@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "limitra"
+name = "abjt-limitter"
 version = "0.1.0"
 description = "A modern Python library for rate limiting algorithms"
 readme = "README.md"
@@ -41,6 +41,7 @@ Homepage = "https://github.com/abjt01/Limitra"
 Documentation = "https://github.com/abjt01/Limitra#readme"
 Repository = "https://github.com/abjt01/Limitra"
 Issues = "https://github.com/abjt01/Limitra/issues"
+Changelog = "https://pypi.org/project/abjt-limitter/#history"
 
 [project.optional-dependencies]
 dev = [
