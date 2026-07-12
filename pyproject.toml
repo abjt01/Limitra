@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Limitra Contributors" },
+    { name = "abjt01" },
 ]
 keywords = [
     "rate-limiting",
@@ -37,10 +37,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/limitra/limitra"
-Documentation = "https://github.com/limitra/limitra#readme"
-Repository = "https://github.com/limitra/limitra"
-Issues = "https://github.com/limitra/limitra/issues"
+Homepage = "https://github.com/abjt01/Limitra"
+Documentation = "https://github.com/abjt01/Limitra#readme"
+Repository = "https://github.com/abjt01/Limitra"
+Issues = "https://github.com/abjt01/Limitra/issues"
 
 [project.optional-dependencies]
 dev = [
