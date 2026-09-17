@@ -462,7 +462,12 @@ class RateLimitManager:
             stale = [
                 key
                 for key, (_, last) in self._entries.items()
-                if now - last > max_idle and key not in self._waiting
+                # `>=`, not `>`: time.monotonic() only advances every ~15.6ms
+                # on Windows, so a key touched and swept inside one tick has
+                # an idle time of exactly 0.0, and `cleanup(0)` — documented
+                # as dropping everything not in use right now — did nothing
+                # at all there.
+                if now - last >= max_idle and key not in self._waiting
             ]
             for key in stale:
                 del self._entries[key]

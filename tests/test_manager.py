@@ -644,3 +644,30 @@ def test_concurrent_waiters_on_one_key_are_counted() -> None:
 
     assert "shared" in mgr
     assert mgr.cleanup(max_idle=0.0) == 1, "the key should be free again"
+
+
+def test_cleanup_zero_idle_works_on_a_coarse_clock(clock) -> None:
+    """``cleanup(0)`` must drop keys even when no time has measurably passed.
+
+    ``time.monotonic()`` advances in ~15.6ms steps on Windows, so a key
+    touched and swept within one tick has an idle time of exactly 0.0.
+    Testing idle time with ``>`` meant ``cleanup(0)`` silently did nothing
+    there, and the map grew without bound.
+    """
+    mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
+    mgr.allow("a")
+    mgr.allow("b")
+
+    # No clock advance at all: idle time is exactly 0.0 for both keys.
+    assert mgr.cleanup(max_idle=0.0) == 2
+    assert len(mgr) == 0
+
+
+def test_cleanup_drops_a_key_idle_for_exactly_max_idle(clock) -> None:
+    """A key that has been idle for precisely max_idle is stale."""
+    mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
+    mgr.allow("a")
+
+    clock.advance(30.0)
+
+    assert mgr.cleanup(max_idle=30.0) == 1

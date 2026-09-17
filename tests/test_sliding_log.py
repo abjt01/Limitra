@@ -227,7 +227,9 @@ def test_retry_after_accuracy() -> None:
     assert denied.allowed is False
 
     # retry_after should be > 0 and <= window
-    assert 0.0 < denied.retry_after <= 0.2
+    # retry_after is nudged just past the boundary so that waiting exactly
+    # this long succeeds, which can carry it a hair beyond the window.
+    assert 0.0 < denied.retry_after <= 0.2 + 1e-3
 
     # Sleep past retry_after plus a small margin
     time.sleep(denied.retry_after + 0.05)
