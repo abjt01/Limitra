@@ -1,0 +1,9 @@
+# SHA-pinned actions do not update themselves; this keeps them current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
