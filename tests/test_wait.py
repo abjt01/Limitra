@@ -24,6 +24,8 @@ from limitra import (
     TokenBucket,
 )
 
+from .conftest import wait_until_blocked
+
 ALL_ALGORITHMS = [TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingLog]
 
 
@@ -290,20 +292,22 @@ def test_manager_wait_keeps_the_key_alive_across_a_sweep() -> None:
     manager = RateLimitManager(FixedWindow, limit=2, window=0.2)
     manager.allow("user-1")
     manager.allow("user-1")
-    swept: list[int] = []
+    outcome: list[bool] = []
 
-    def sweeper() -> None:
-        for _ in range(8):
-            time.sleep(0.01)
-            swept.append(manager.cleanup(max_idle=0.0))
+    def waiter() -> None:
+        outcome.append(manager.wait("user-1", timeout=5.0).allowed)
 
-    thread = threading.Thread(target=sweeper)
+    thread = threading.Thread(target=waiter)
     thread.start()
-    result = manager.wait("user-1", timeout=3.0)
-    thread.join(timeout=5.0)
+    # Sweep only once the wait is genuinely in flight, or the test would be
+    # racing the thread rather than testing the manager.
+    wait_until_blocked(manager, "user-1")
 
-    assert result.allowed is True
-    assert sum(swept) == 0, "the key being waited on was swept away"
+    swept = sum(manager.cleanup(max_idle=0.0) for _ in range(8))
+    thread.join(timeout=10.0)
+
+    assert swept == 0, "the key being waited on was swept away"
+    assert outcome == [True]
 
 
 def test_concurrent_async_waiters_on_one_key_are_counted() -> None:

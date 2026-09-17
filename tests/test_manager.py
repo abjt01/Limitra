@@ -15,6 +15,8 @@ from limitra import (
     TokenBucket,
 )
 
+from .conftest import wait_until_blocked
+
 # ------------------------------------------------------------------ #
 # Initialisation
 # ------------------------------------------------------------------ #
@@ -310,14 +312,14 @@ def test_every_accessor_refreshes_the_idle_timer(accessor: str) -> None:
     assert "user-1" in mgr
 
 
-def test_cleanup_keeps_active_keys_and_drops_idle_ones() -> None:
+def test_cleanup_keeps_active_keys_and_drops_idle_ones(clock) -> None:
     """Only keys past max_idle are removed."""
     mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
     mgr.allow("old")
-    time.sleep(0.05)
+    clock.advance(60.0)
     mgr.allow("fresh")
 
-    removed = mgr.cleanup(max_idle=0.03)
+    removed = mgr.cleanup(max_idle=30.0)
     assert removed == 1
     assert mgr.keys() == ["fresh"]
 
@@ -586,16 +588,12 @@ def test_eviction_cannot_reclaim_a_key_with_a_wait_in_flight() -> None:
     """max_keys must not drop the key a waiter is blocked on either."""
     mgr = RateLimitManager(FixedWindow, max_keys=2, limit=1, window=0.3)
     mgr.allow("waiter")
-    started = threading.Event()
 
-    def blocked() -> None:
-        started.set()
-        mgr.wait("waiter", timeout=3.0)
-
-    thread = threading.Thread(target=blocked)
+    thread = threading.Thread(
+        target=mgr.wait, args=("waiter",), kwargs={"timeout": 3.0}
+    )
     thread.start()
-    started.wait(timeout=2.0)
-    time.sleep(0.02)
+    wait_until_blocked(mgr, "waiter")
 
     for i in range(20):
         mgr.allow(f"flood-{i}")
@@ -618,7 +616,7 @@ def test_eviction_falls_back_to_lru_when_every_candidate_is_waiting() -> None:
         thread = threading.Thread(target=mgr.wait, args=(key,), kwargs={"timeout": 3.0})
         thread.start()
         threads.append(thread)
-    time.sleep(0.05)
+        wait_until_blocked(mgr, key)
 
     mgr.allow("newcomer")
 

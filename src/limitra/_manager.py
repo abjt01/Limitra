@@ -165,7 +165,7 @@ class RateLimitManager:
             limiter = self._algorithm(**self._kwargs)
         else:
             limiter = entry[0]
-        self._entries[key] = (limiter, time.monotonic())
+        self._entries[key] = (limiter, RateLimiter._now())
         self._entries.move_to_end(key)
         return limiter
 
@@ -190,7 +190,7 @@ class RateLimitManager:
             # probe would answer for an untracked key with whatever phase
             # the manager happened to be built in.
             return self._algorithm(**self._kwargs)
-        self._entries[key] = (entry[0], time.monotonic())
+        self._entries[key] = (entry[0], RateLimiter._now())
         self._entries.move_to_end(key)
         return entry[0]
 
@@ -457,7 +457,7 @@ class RateLimitManager:
         Returns:
             Number of limiters removed.
         """
-        now = time.monotonic()
+        now = RateLimiter._now()
         with self._lock:
             stale = [
                 key
