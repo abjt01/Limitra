@@ -85,8 +85,12 @@ class FixedWindow(RateLimiter):
             The current monotonic time.
         """
         now = self._now()
-        elapsed = now - self._window_start
-        if elapsed >= self._window:
+        # Test the boundary with the same expression that reports it, so a
+        # reported wait of zero is impossible: `now - start >= window` and
+        # `now >= start + window` disagree at the last bit, which left the
+        # window unrolled while Retry-After said 0.
+        if now >= self._window_start + self._window:
+            elapsed = now - self._window_start
             self._counter = 0
             self._window_start += (elapsed // self._window) * self._window
         return now

@@ -7,7 +7,9 @@ callers and commonly stuffed into sets, dict keys and assertions.
 
 from __future__ import annotations
 
+import datetime
 import math
+import time
 
 import pytest
 
@@ -115,27 +117,22 @@ def test_repr_contains_every_field() -> None:
 def test_headers_when_allowed_omit_retry_after() -> None:
     """An allowed request gets no Retry-After header."""
     headers = make_result(allowed=True, remaining=7, limit=10).as_headers()
-    assert headers == {
-        "RateLimit-Limit": "10",
-        "RateLimit-Remaining": "7",
-        "RateLimit-Reset": "2",
-        "X-RateLimit-Limit": "10",
-        "X-RateLimit-Remaining": "7",
-        "X-RateLimit-Reset": "2",
-    }
+    assert "Retry-After" not in headers
+    assert headers["RateLimit-Limit"] == "10"
+    assert headers["RateLimit-Remaining"] == "7"
+    assert headers["RateLimit-Reset"] == "2"
 
 
 def test_headers_emit_both_naming_conventions_with_equal_values() -> None:
     """Clients disagree on the prefix, so both are sent and must agree."""
     headers = make_result(allowed=False, remaining=0, limit=10).as_headers()
-    for field in ("Limit", "Remaining", "Reset"):
+    for field in ("Limit", "Remaining"):
         assert headers[f"RateLimit-{field}"] == headers[f"X-RateLimit-{field}"]
 
 
 def test_reset_header_is_seconds_not_a_timestamp() -> None:
     """X-RateLimit-Reset is a delta, so it must stay small, not epoch-sized."""
-    headers = make_result(reset_after=30.0).as_headers()
-    assert headers["X-RateLimit-Reset"] == "30"
+    assert make_result(reset_after=30.0).as_headers()["RateLimit-Reset"] == "30"
 
 
 def test_headers_when_denied_include_retry_after() -> None:
@@ -150,7 +147,7 @@ def test_headers_round_retry_after_up() -> None:
     result = make_result(allowed=False, reset_after=0.1, retry_after=0.1)
     headers = result.as_headers()
     assert headers["Retry-After"] == "1"
-    assert headers["X-RateLimit-Reset"] == "1"
+    assert headers["RateLimit-Reset"] == "1"
 
 
 def test_headers_are_all_strings() -> None:
@@ -179,3 +176,22 @@ def test_retry_after_header_never_under_reports() -> None:
     denied = limiter.allow()
     assert denied.allowed is False
     assert int(denied.as_headers()["Retry-After"]) >= math.floor(denied.retry_after)
+
+
+def test_reset_headers_use_each_names_own_convention() -> None:
+    """The two spellings are read differently, so they carry different units.
+
+    ``RateLimit-Reset`` is delta-seconds per the IETF draft;
+    ``X-RateLimit-Reset`` is a Unix timestamp, which is how GitHub-style
+    clients parse that name. Sending a delta under the ``X-`` name makes
+    such a client compute a sleep of minus fifty years.
+    """
+    before = time.time()
+    headers = make_result(reset_after=3600.0).as_headers()
+    after = time.time()
+
+    assert headers["RateLimit-Reset"] == "3600"
+
+    stamp = int(headers["X-RateLimit-Reset"])
+    assert before + 3600 <= stamp <= after + 3601
+    assert datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).year >= 2026

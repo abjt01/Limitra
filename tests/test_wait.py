@@ -271,3 +271,54 @@ def test_wait_without_a_timeout_blocks_until_capacity_returns() -> None:
     assert result.allowed is True
     assert elapsed > 0.0, "it should have had to wait"
     assert elapsed < 5.0
+
+
+def test_manager_wait_async_times_out_without_raising() -> None:
+    """A timed-out async wait on a key returns the denial."""
+    manager = RateLimitManager(FixedWindow, limit=1, window=60.0)
+    manager.allow("user-1")
+    assert asyncio.run(manager.wait_async("user-1", timeout=0.05)).allowed is False
+
+
+def test_manager_wait_keeps_the_key_alive_across_a_sweep() -> None:
+    """cleanup() must not reclaim the very key a wait() is blocked on.
+
+    The stamp used to be written once, before blocking, so a sweep during
+    a long wait dropped the key and the waiter came back to a brand new
+    limiter — quietly doubling that key's budget.
+    """
+    manager = RateLimitManager(FixedWindow, limit=2, window=0.2)
+    manager.allow("user-1")
+    manager.allow("user-1")
+    swept: list[int] = []
+
+    def sweeper() -> None:
+        for _ in range(8):
+            time.sleep(0.01)
+            swept.append(manager.cleanup(max_idle=0.0))
+
+    thread = threading.Thread(target=sweeper)
+    thread.start()
+    result = manager.wait("user-1", timeout=3.0)
+    thread.join(timeout=5.0)
+
+    assert result.allowed is True
+    assert sum(swept) == 0, "the key being waited on was swept away"
+
+
+def test_concurrent_async_waiters_on_one_key_are_counted() -> None:
+    """Two coroutines waiting on one key both hold it until they finish."""
+    manager = RateLimitManager(FixedWindow, limit=2, window=0.2)
+    manager.allow("shared")
+    manager.allow("shared")
+
+    async def main() -> list[bool]:
+        results = await asyncio.gather(
+            manager.wait_async("shared", timeout=3.0),
+            manager.wait_async("shared", timeout=3.0),
+        )
+        return [r.allowed for r in results]
+
+    assert all(asyncio.run(main()))
+    assert "shared" in manager
+    assert manager.cleanup(max_idle=0.0) == 1

@@ -120,7 +120,7 @@ class SlidingLog(RateLimiter):
         # Slots that must expire before `cost` fits; the log is sorted, so
         # the one that frees the last needed slot is at index need - 1.
         need = len(self._log) + cost - self._limit
-        return _satisfiable(self._log[need - 1] + self._window - now)
+        return _satisfiable(self._log[need - 1] + self._window - now, now)
 
     # ------------------------------------------------------------------
     # Public API

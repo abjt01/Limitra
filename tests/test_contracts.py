@@ -271,7 +271,7 @@ def test_headers_never_under_report_the_wait(
 
     headers = denied.as_headers()
     assert int(headers["Retry-After"]) >= denied.retry_after
-    assert int(headers["X-RateLimit-Reset"]) >= denied.reset_after
+    assert int(headers["RateLimit-Reset"]) >= denied.reset_after
     assert int(headers["X-RateLimit-Remaining"]) == denied.remaining
 
 
@@ -323,21 +323,116 @@ def test_integer_window_is_accepted(algorithm: type[RateLimiter]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_satisfiable_nudges_a_wait_past_the_boundary() -> None:
-    """retry_after must land just after the moment capacity returns.
+def test_satisfiable_clears_the_boundary_at_realistic_clock_values() -> None:
+    """The nudge must scale to the clock the caller lands on.
 
-    It is derived by inverting the same float arithmetic the limiter redoes
-    on the next call, so the exact answer can be one ULP short and deny a
-    caller who waited precisely as told.
+    One ULP of a short duration is far smaller than one ULP of a monotonic
+    reading taken days into a machine's uptime, so nudging the duration
+    left the caller landing fractionally short.
     """
-    assert _satisfiable(1.0) > 1.0
-    assert _satisfiable(1.0) == math.nextafter(1.0, math.inf)
+    for now in (0.0, 1e3, 1e6, 1e9):
+        for seconds in (1e-3, 0.25, 60.0):
+            wait = _satisfiable(seconds, now)
+            assert wait >= seconds
+            assert now + wait > now + seconds, f"nudge vanished at now={now}"
 
 
 @pytest.mark.parametrize("value", [0.0, -0.0, -1.0])
-def test_satisfiable_never_returns_a_negative_wait(value: float) -> None:
-    """Nothing is ever asked to wait a negative amount of time."""
-    assert _satisfiable(value) == 0.0
+def test_satisfiable_never_advertises_an_immediate_retry(value: float) -> None:
+    """A denial saying "retry in 0.0s" sends an obedient client into a spin."""
+    assert _satisfiable(value, 1e6) > 0.0
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_every_denial_advertises_a_positive_wait(
+    algorithm: type[RateLimiter], clock: FakeClock
+) -> None:
+    """``allowed is False`` must never come with ``retry_after == 0.0``.
+
+    A caller looping on ``sleep(result.retry_after)`` would otherwise burn
+    a core, and the HTTP header would read ``Retry-After: 0``.
+    """
+    limiter = make_limiter(algorithm)
+    for _ in range(LIMIT):
+        limiter.allow()
+
+    for step in (0.0, PERIOD / 3, PERIOD / 2, PERIOD * 0.9):
+        clock.advance(step)
+        for cost in (1, LIMIT):
+            for result in (limiter.peek(cost), limiter.allow(cost)):
+                if not result.allowed:
+                    assert result.retry_after > 0.0, (
+                        f"{algorithm.__name__} denied cost={cost} but said "
+                        f"retry_after={result.retry_after}"
+                    )
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_a_request_that_exactly_fits_is_admitted(
+    algorithm: type[RateLimiter], clock: FakeClock
+) -> None:
+    """Float cancellation must not refuse a request that exactly fits."""
+    limiter = make_limiter(algorithm)
+    limiter.allow(cost=LIMIT // 2)
+
+    free = limiter.remaining()
+    assert free > 0
+    assert limiter.allow(cost=free).allowed is True, "an exact fit was refused"
+    assert limiter.remaining() == 0
+
+
+def test_sliding_window_admits_an_exact_fit_against_a_decayed_window(
+    clock: FakeClock,
+) -> None:
+    """The decayed count is where cancellation bites hardest.
+
+    Combining two counters across a decaying overlap cancels digits, so a
+    weighted count that is mathematically a whole number can come out a few
+    ULPs high — refusing a request that fits exactly, and then advertising
+    a zero-second wait for it.
+    """
+    for spent in range(1, LIMIT + 1):
+        limiter = SlidingWindow(limit=LIMIT, window=PERIOD)
+        limiter.allow(cost=spent)
+        clock.advance(PERIOD * 1.5)  # half the previous window still counts
+
+        free = limiter.remaining()
+        result = limiter.allow(cost=free)
+        assert result.allowed is True, f"exact fit of {free} refused after {spent}"
+        assert result.retry_after == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Copying a subclass
+# ---------------------------------------------------------------------------
+
+
+class _TaggedBucket(TokenBucket):
+    """A subclass with an instance dict, the ordinary way people extend."""
+
+    def __init__(self, tag: str, **kwargs: object) -> None:
+        """Store an arbitrary attribute alongside the limiter state."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.tag = tag
+
+
+def test_copying_keeps_subclass_attributes() -> None:
+    """A subclass without __slots__ has a __dict__, which must be carried.
+
+    Walking __slots__ alone silently dropped everything a subclass stored,
+    so the copy came back missing attributes rather than failing loudly.
+    """
+    original = _TaggedBucket("primary", rate=1.0, capacity=10)
+    original.allow(cost=3)
+
+    for clone in (
+        copy.copy(original),
+        copy.deepcopy(original),
+        pickle.loads(pickle.dumps(original)),
+    ):
+        assert clone.tag == "primary"
+        assert clone.remaining() == 7
+        assert clone._lock is not original._lock
 
 
 # ---------------------------------------------------------------------------

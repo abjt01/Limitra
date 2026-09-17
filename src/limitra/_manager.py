@@ -67,7 +67,15 @@ class RateLimitManager:
         True
     """
 
-    __slots__ = ("_algorithm", "_entries", "_kwargs", "_lock", "_max_keys", "_probe")
+    __slots__ = (
+        "_algorithm",
+        "_entries",
+        "_kwargs",
+        "_lock",
+        "_max_keys",
+        "_probe",
+        "_waiting",
+    )
 
     def __init__(
         self,
@@ -101,6 +109,10 @@ class RateLimitManager:
         # key -> (limiter, last access time). A single mapping keeps the
         # limiter and its access stamp impossible to get out of sync.
         self._entries: OrderedDict[str, tuple[RateLimiter, float]] = OrderedDict()
+        # Keys with a wait() in flight. A waiter sleeps outside the lock
+        # for as long as its timeout allows, and reclaiming its key part
+        # way through would hand it a brand new budget.
+        self._waiting: dict[str, int] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -117,11 +129,19 @@ class RateLimitManager:
 
         Must be called while ``self._lock`` is held.
         """
-        for key in islice(self._entries, _EVICTION_SCAN):
+        candidates = [
+            key
+            for key in islice(self._entries, _EVICTION_SCAN)
+            if key not in self._waiting
+        ]
+        for key in candidates:
             limiter, _ = self._entries[key]
             if limiter.remaining() >= limiter.limit:
                 del self._entries[key]
                 return
+        if candidates:
+            del self._entries[candidates[0]]
+            return
         self._entries.popitem(last=False)
 
     def _touch(self, key: str) -> RateLimiter:
@@ -165,7 +185,11 @@ class RateLimitManager:
         """
         entry = self._entries.get(key)
         if entry is None:
-            return self._probe
+            # A fresh limiter, not the long-lived probe: the window
+            # algorithms anchor their boundary to construction time, so the
+            # probe would answer for an untracked key with whatever phase
+            # the manager happened to be built in.
+            return self._algorithm(**self._kwargs)
         self._entries[key] = (entry[0], time.monotonic())
         self._entries.move_to_end(key)
         return entry[0]
@@ -201,6 +225,10 @@ class RateLimitManager:
     ) -> RateLimitResult:
         """Block until *key* has ``cost`` units available, then consume them.
 
+        The key is held for the duration of the call, so neither
+        :meth:`cleanup` nor ``max_keys`` eviction can reclaim the very key
+        being waited on — which would hand that caller a brand new budget.
+
         Args:
             key: The rate-limit key.
             cost: Number of units to consume. Defaults to 1.
@@ -216,9 +244,26 @@ class RateLimitManager:
                 negative.
         """
         self._probe._validate_cost(cost)
+        deadline = self._probe._wait_deadline(timeout)
         with self._lock:
-            limiter = self._touch(key)
-        return limiter.wait(cost, timeout)
+            self._waiting[key] = self._waiting.get(key, 0) + 1
+        try:
+            while True:
+                with self._lock:
+                    limiter = self._touch(key)
+                result = limiter.allow(cost)
+                if result.allowed:
+                    return result
+                delay = limiter._wait_delay(result, deadline)
+                if delay is None:
+                    return result
+                time.sleep(delay)
+        finally:
+            with self._lock:
+                if self._waiting.get(key, 0) > 1:
+                    self._waiting[key] -= 1
+                else:
+                    self._waiting.pop(key, None)
 
     async def wait_async(
         self, key: str, cost: int = 1, timeout: float | None = None
@@ -239,10 +284,29 @@ class RateLimitManager:
             ValueError: If ``cost`` is out of range, or ``timeout`` is
                 negative.
         """
+        import asyncio
+
         self._probe._validate_cost(cost)
+        deadline = self._probe._wait_deadline(timeout)
         with self._lock:
-            limiter = self._touch(key)
-        return await limiter.wait_async(cost, timeout)
+            self._waiting[key] = self._waiting.get(key, 0) + 1
+        try:
+            while True:
+                with self._lock:
+                    limiter = self._touch(key)
+                result = limiter.allow(cost)
+                if result.allowed:
+                    return result
+                delay = limiter._wait_delay(result, deadline)
+                if delay is None:
+                    return result
+                await asyncio.sleep(delay)
+        finally:
+            with self._lock:
+                if self._waiting.get(key, 0) > 1:
+                    self._waiting[key] -= 1
+                else:
+                    self._waiting.pop(key, None)
 
     def peek(self, key: str, cost: int = 1) -> RateLimitResult:
         """Check whether a request for *key* would be allowed, without consuming.
@@ -396,7 +460,9 @@ class RateLimitManager:
         now = time.monotonic()
         with self._lock:
             stale = [
-                key for key, (_, last) in self._entries.items() if now - last > max_idle
+                key
+                for key, (_, last) in self._entries.items()
+                if now - last > max_idle and key not in self._waiting
             ]
             for key in stale:
                 del self._entries[key]

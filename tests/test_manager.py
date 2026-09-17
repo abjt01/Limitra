@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -579,3 +580,69 @@ def test_manager_refund_validates_cost() -> None:
     with pytest.raises(ValueError, match="cost must be <= limit"):
         mgr.refund("user-1", cost=99)
     assert len(mgr) == 0
+
+
+def test_eviction_cannot_reclaim_a_key_with_a_wait_in_flight() -> None:
+    """max_keys must not drop the key a waiter is blocked on either."""
+    mgr = RateLimitManager(FixedWindow, max_keys=2, limit=1, window=0.3)
+    mgr.allow("waiter")
+    started = threading.Event()
+
+    def blocked() -> None:
+        started.set()
+        mgr.wait("waiter", timeout=3.0)
+
+    thread = threading.Thread(target=blocked)
+    thread.start()
+    started.wait(timeout=2.0)
+    time.sleep(0.02)
+
+    for i in range(20):
+        mgr.allow(f"flood-{i}")
+
+    assert "waiter" in mgr, "an in-flight wait was evicted"
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+
+
+def test_eviction_falls_back_to_lru_when_every_candidate_is_waiting() -> None:
+    """With nothing safe to drop, the map is still bounded.
+
+    Holding keys for in-flight waits must not let the map grow without
+    limit; if every candidate is busy, the least-recently-used one goes.
+    """
+    mgr = RateLimitManager(FixedWindow, max_keys=2, limit=1, window=0.3)
+    threads = []
+    for key in ("w1", "w2"):
+        mgr.allow(key)
+        thread = threading.Thread(target=mgr.wait, args=(key,), kwargs={"timeout": 3.0})
+        thread.start()
+        threads.append(thread)
+    time.sleep(0.05)
+
+    mgr.allow("newcomer")
+
+    assert len(mgr) <= 2
+    for thread in threads:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
+
+def test_concurrent_waiters_on_one_key_are_counted() -> None:
+    """Two waiters on the same key: the first to finish must not release it."""
+    mgr = RateLimitManager(FixedWindow, limit=2, window=0.2)
+    mgr.allow("shared")
+    mgr.allow("shared")
+
+    threads = [
+        threading.Thread(target=mgr.wait, args=("shared",), kwargs={"timeout": 3.0})
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive()
+
+    assert "shared" in mgr
+    assert mgr.cleanup(max_idle=0.0) == 1, "the key should be free again"

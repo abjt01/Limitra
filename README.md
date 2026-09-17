@@ -73,7 +73,8 @@ It's frozen and hashable, and `if result:` means `if result.allowed:`.
 
 `retry_after` is exact: wait that long and the next attempt gets through.
 It isn't rounded up to the next window, so a client that obeys it isn't
-throttled to less than the rate you configured.
+throttled to less than the rate you configured, and a denial never
+advertises a zero-second wait.
 
 For HTTP, hand it straight to your framework:
 
@@ -83,10 +84,14 @@ response.headers.update(result.as_headers())
 ```
 
 That sets `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`,
-plus the older `X-RateLimit-*` spellings with the same values, and
-`Retry-After` when the request was denied. **Every time value is seconds
-from now, not a Unix timestamp**, and is rounded up, so a client that obeys
-the headers never comes back early.
+the older `X-RateLimit-*` spellings, and `Retry-After` when the request was
+denied.
+
+The two spellings are read differently, so each carries the unit its
+readers expect: `RateLimit-Reset` and `Retry-After` are **seconds from
+now**, while `X-RateLimit-Reset` is a **Unix timestamp**, which is how
+GitHub-style clients parse that name. Times round up, so a client that
+obeys them never comes back early.
 
 ## The rest of the API
 

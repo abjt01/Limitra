@@ -14,27 +14,40 @@ from typing import Any
 #: of ``0.0`` cannot turn the wait loop into a busy spin.
 _MIN_WAIT_SLEEP = 0.001
 
+#: Smallest wait a denial will ever advertise. A denial saying "retry in
+#: 0.0s" is a contradiction that sends an obedient client into a hot loop,
+#: and it is also larger than any float rounding error at monotonic-clock
+#: magnitudes, so it doubles as the floor for the nudge below.
+_MIN_RETRY_AFTER = 1e-6
+
 #: Slots that must never be carried into a copy: a lock cannot be shared
 #: between two limiters, and weak references belong to the original.
 _UNCOPIED_SLOTS = frozenset({"_lock", "__weakref__"})
 
 
-def _satisfiable(seconds: float) -> float:
-    """Round a wait up by one ULP so sleeping exactly this long succeeds.
+def _satisfiable(seconds: float, now: float) -> float:
+    """Round a denial's wait up so sleeping exactly this long succeeds.
 
     ``retry_after`` inverts the same float arithmetic the limiter will redo
-    on the next call, so the exact result can land one unit in the last
-    place short and deny a caller who waited precisely as instructed.
+    on the next call, so the exact answer can land fractionally short and
+    deny a caller who waited precisely as instructed.
+
+    The nudge is applied to the *instant* the caller will land on rather
+    than to the duration: the caller adds this to a monotonic timestamp,
+    and one unit in the last place of a large clock reading is far bigger
+    than one ULP of a short duration. The result is then floored at
+    :data:`_MIN_RETRY_AFTER`, which is both a guarantee that no denial
+    advertises an immediate retry and slack well above any rounding error.
 
     Args:
         seconds: The computed wait, which may be zero or negative.
+        now: The monotonic time the wait is measured from.
 
     Returns:
-        The wait, nudged just past the boundary. Never negative.
+        A strictly positive wait that clears the boundary.
     """
-    if seconds <= 0.0:
-        return 0.0
-    return math.nextafter(seconds, math.inf)
+    deadline = math.nextafter(now + max(seconds, 0.0), math.inf)
+    return max(deadline - now, _MIN_RETRY_AFTER)
 
 
 def _check_rate(rate: float) -> float:
@@ -104,6 +117,22 @@ def _check_size(value: int, name: str) -> int:
     return value
 
 
+def _slot_names(klass: type) -> tuple[str, ...]:
+    """Return a class's own ``__slots__`` as a tuple of names.
+
+    ``__slots__`` may be written as a bare string for a single slot, which
+    would otherwise iterate character by character.
+
+    Args:
+        klass: The class to inspect.
+
+    Returns:
+        The slot names declared directly on ``klass``.
+    """
+    slots = klass.__dict__.get("__slots__", ())
+    return (slots,) if isinstance(slots, str) else tuple(slots)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class RateLimitResult:
     """Immutable result of a rate limit check.
@@ -151,28 +180,29 @@ class RateLimitResult:
     def as_headers(self) -> dict[str, str]:
         """Render the result as rate limit HTTP response headers.
 
-        Every time value is **seconds from now**, never a Unix timestamp,
-        and is rounded up to whole seconds so a client that obeys the
-        headers never comes back too early.
+        Both spellings are emitted, each in the convention its readers
+        expect. ``RateLimit-Reset`` and ``Retry-After`` are **seconds from
+        now**; ``X-RateLimit-Reset`` is a **Unix timestamp**, which is how
+        GitHub-style clients parse that name. Sending delta-seconds under
+        the ``X-`` name would have such a client compute a sleep of minus
+        fifty years.
 
-        Both the standard ``RateLimit-*`` names and the older
-        ``X-RateLimit-*`` ones are emitted with identical values, because
-        clients disagree about which to read. ``Retry-After`` appears only
-        when the request was denied.
+        Times round up, so a client that obeys the headers never comes back
+        too early. ``Retry-After`` appears only when the request was denied.
 
         Returns:
             A mapping of header name to header value.
         """
         limit = str(self.limit)
         remaining = str(self.remaining)
-        reset = str(math.ceil(self.reset_after))
+        reset = math.ceil(self.reset_after)
         headers = {
             "RateLimit-Limit": limit,
             "RateLimit-Remaining": remaining,
-            "RateLimit-Reset": reset,
+            "RateLimit-Reset": str(reset),
             "X-RateLimit-Limit": limit,
             "X-RateLimit-Remaining": remaining,
-            "X-RateLimit-Reset": reset,
+            "X-RateLimit-Reset": str(math.ceil(time.time()) + reset),
         }
         if not self.allowed:
             headers["Retry-After"] = str(math.ceil(self.retry_after))
@@ -452,12 +482,17 @@ class RateLimiter(ABC):
         Returns:
             Every slot except the lock.
         """
-        return {
+        state = {
             name: getattr(self, name)
             for klass in type(self).__mro__
-            for name in getattr(klass, "__slots__", ())
+            for name in _slot_names(klass)
             if name not in _UNCOPIED_SLOTS and hasattr(self, name)
         }
+        # A subclass that does not declare __slots__ gets an instance dict,
+        # which is the ordinary way people extend a class. Walking slots
+        # alone would silently drop everything it holds.
+        state.update(getattr(self, "__dict__", {}))
+        return state
 
     def __copy__(self) -> RateLimiter:
         """Return an independent limiter with the same state.

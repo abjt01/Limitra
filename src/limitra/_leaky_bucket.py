@@ -119,8 +119,9 @@ class LeakyBucket(RateLimiter):
             A :class:`RateLimitResult` with the outcome.
 
         Raises:
-            ValueError: If ``cost`` is less than 1.
-            TypeError: If ``cost`` is not an integer.
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is less than 1 or greater than
+                :attr:`limit`.
         """
         self._validate_cost(cost)
         with self._lock:
@@ -140,7 +141,7 @@ class LeakyBucket(RateLimiter):
                 remaining=max(0, self._capacity - math.ceil(self._water_level)),
                 limit=self._capacity,
                 reset_after=max(0.0, self._water_level / self._rate),
-                retry_after=_satisfiable(retry),
+                retry_after=_satisfiable(retry, self._now()),
             )
 
     def _peek_unlocked(self, cost: int = 1) -> RateLimitResult:
@@ -156,8 +157,9 @@ class LeakyBucket(RateLimiter):
             A :class:`RateLimitResult` representing what *would* happen.
 
         Raises:
-            ValueError: If ``cost`` is less than 1.
-            TypeError: If ``cost`` is not an integer.
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is less than 1 or greater than
+                :attr:`limit`.
         """
         self._validate_cost(cost)
         self._drain()
@@ -176,7 +178,7 @@ class LeakyBucket(RateLimiter):
             remaining=max(0, self._capacity - math.ceil(self._water_level)),
             limit=self._capacity,
             reset_after=max(0.0, self._water_level / self._rate),
-            retry_after=_satisfiable(retry),
+            retry_after=_satisfiable(retry, self._now()),
         )
 
     def remaining(self) -> int:

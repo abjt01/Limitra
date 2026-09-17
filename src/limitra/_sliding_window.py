@@ -12,6 +12,12 @@ from limitra._base import (
     _satisfiable,
 )
 
+#: Relative slack for the weighted count. Combining two counters across a
+#: decaying overlap cancels digits, so a count that is mathematically an
+#: exact integer can come out a few ULPs high — enough to refuse a request
+#: that fits exactly, and then advertise a zero-second wait for it.
+_COUNT_TOLERANCE = 1e-9
+
 
 class SlidingWindow(RateLimiter):
     """Rate limiter using the sliding window counter algorithm.
@@ -107,7 +113,12 @@ class SlidingWindow(RateLimiter):
             Weighted count combining the previous and current windows.
         """
         overlap_ratio = max(0.0, 1.0 - (now - self._window_start) / self._window)
-        return self._prev_counter * overlap_ratio + self._curr_counter
+        weighted = self._prev_counter * overlap_ratio + self._curr_counter
+        # Snap a count that is within rounding distance of a whole number,
+        # so an exactly-fitting request is not refused by a stray ULP.
+        nearest = round(weighted)
+        slack = _COUNT_TOLERANCE * max(1.0, float(self._limit))
+        return float(nearest) if abs(weighted - nearest) <= slack else weighted
 
     def _reset_after(self, now: float, prev: int, curr: int) -> float:
         """Seconds until nothing is counted against the limiter any more.
@@ -155,7 +166,7 @@ class SlidingWindow(RateLimiter):
             deadline = self._window_start + self._window * (
                 1.0 - target / self._prev_counter
             )
-            return _satisfiable(deadline - now)
+            return _satisfiable(deadline - now, now)
 
         # Not admissible before the boundary: the current counter alone is
         # already too large. After the rotation it becomes the previous one
@@ -163,9 +174,9 @@ class SlidingWindow(RateLimiter):
         boundary = self._window_start + self._window
         target = self._limit - cost
         if self._curr_counter <= target:
-            return _satisfiable(boundary - now)
+            return _satisfiable(boundary - now, now)
         deadline = boundary + self._window * (1.0 - target / self._curr_counter)
-        return _satisfiable(deadline - now)
+        return _satisfiable(deadline - now, now)
 
     # ------------------------------------------------------------------
     # Public API

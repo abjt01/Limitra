@@ -5,6 +5,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — unreleased
 
+### Breaking
+
+For callers:
+
+- A `cost` greater than the limiter's `limit` raises `ValueError` instead of
+  returning a denial, and `cost=True` raises `TypeError`.
+- `RateLimitResult` is frozen.
+- `RateLimitManager`'s read-only methods no longer create a key.
+- `X-RateLimit-Reset` is now a Unix timestamp rather than delta-seconds
+  (`RateLimit-Reset` carries the delta). See below.
+
+For anyone subclassing `RateLimiter` directly:
+
+- The ABC gained two abstract members, `limit` and `refund`. A 0.1.0
+  subclass that does not implement both can no longer be instantiated.
+- `_validate_cost` is an instance method now, not a static one, because it
+  checks `cost` against `self.limit`. `RateLimiter._validate_cost(cost)`
+  must become `self._validate_cost(cost)`.
+
 ### Fixed
 
 - **Both buckets accepted a NaN or infinite `rate` and then admitted
@@ -43,8 +62,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FixedWindow` and `SlidingWindow` returned a full window on an idle,
   completely unused limiter. It is now `0.0` exactly when the limiter is at
   full capacity, on every algorithm.
-- **A `retry_after` of exactly the right length could be one ULP short**, so
-  waiting precisely as instructed was denied again.
+- **`retry_after` could be fractionally short, and a denial could advertise
+  `retry_after == 0.0`.** The wait was nudged by one unit in the last place
+  of the *duration*, but the caller adds it to a monotonic clock reading
+  whose ULP is far larger, so waiting exactly as instructed was denied
+  again — and the second denial then said "retry in 0.0s", which sends an
+  obedient client into a hot loop and emits `Retry-After: 0`. The nudge now
+  scales to the instant the caller lands on and is floored at a microsecond,
+  so a denial always advertises a wait that works. Over a randomised sweep
+  of 3,000 limiters and 35,000 denials, none is now denied after obeying
+  `retry_after`, and none reports zero.
+- **`SlidingWindow` refused requests that fit exactly.** Combining two
+  counters across a decaying overlap cancels digits, so a weighted count
+  that is mathematically a whole number came out a few ULPs high. The count
+  is now snapped to the nearest whole number when it is within rounding
+  distance.
+- **`FixedWindow` tested its boundary with a different expression than it
+  reported.** `now - start >= window` and `now >= start + window` disagree
+  at the last bit, which left the window unrolled while `Retry-After` said
+  zero.
 - **`SlidingLog` kept entries whose age was exactly `window`**, for the same
   reason; the window is now half-open.
 - **`RateLimitResult.__eq__` compared only three of five fields**, so
@@ -83,8 +119,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `RateLimitResult` is frozen. It is a snapshot of a decision, and mutating
   one was never meaningful.
 - `as_headers()` emits both the `RateLimit-*` and `X-RateLimit-*` spellings,
-  since clients disagree about which to read, and documents that every value
-  is seconds from now rather than a Unix timestamp.
+  each in the convention its readers expect: `RateLimit-Reset` and
+  `Retry-After` are seconds from now, while `X-RateLimit-Reset` is a Unix
+  timestamp, which is how GitHub-style clients parse that name. Sending a
+  delta under the `X-` name had such a client compute a sleep of minus fifty
+  years.
+- `RateLimitManager.wait()` holds its key for the duration of the call, so
+  neither `cleanup()` nor `max_keys` eviction can reclaim the key being
+  waited on and hand that caller a fresh budget.
 - The manager's read-only methods — `peek`, `remaining`, `reset_after`,
   `get` — no longer create a key. Only `allow`, `wait` and `wait_async` do.
 - `RateLimitManager` builds one limiter at construction, so a mistyped
@@ -136,8 +178,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regression regardless of how fast the machine is.
 - Timing-dependent tests run on a controllable clock instead of `sleep`,
   making the decay and retry maths exact.
-- Coverage is 100% of statements and branches, and the suite passes on
-  Python 3.10 through 3.14 and on free-threaded 3.14t, where the GIL is not
+- Coverage is 100% of statements and branches across 520 tests, and the
+  suite passes on Python 3.10 through 3.14 and on free-threaded 3.14t, where the GIL is not
   there to cover for a missing lock.
 
 ## [0.1.0] — 2026-07-12
