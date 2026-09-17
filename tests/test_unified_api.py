@@ -23,6 +23,7 @@ from limitra import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_limiter(cls: type[RateLimiter]) -> RateLimiter:
     """Create any limiter with equivalent semantics (≈20 requests allowed)."""
     if cls in (TokenBucket, LeakyBucket):
@@ -36,6 +37,7 @@ ALL_ALGORITHMS = [TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingL
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
 class TestUnifiedAPI:
@@ -207,3 +209,92 @@ class TestUnifiedAPI:
 
         limiter.reset()
         assert limiter.remaining() > 0
+
+
+# ---------------------------------------------------------------------------
+# Configuration is readable back off the limiter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_limit_property_reports_max_burst(algorithm: type[RateLimiter]) -> None:
+    """Every algorithm exposes the largest cost it could ever admit."""
+    limiter = make_limiter(algorithm)
+    assert limiter.limit == 20
+    assert limiter.allow(cost=20).allowed is True
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_limit_matches_the_result_limit(algorithm: type[RateLimiter]) -> None:
+    """The limiter's limit and the result's limit agree."""
+    limiter = make_limiter(algorithm)
+    assert limiter.allow().limit == limiter.limit
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_cost_above_limit_is_rejected(algorithm: type[RateLimiter]) -> None:
+    """A cost no configuration could satisfy raises instead of denying.
+
+    Returning a denial would hand the caller a ``retry_after`` that will
+    never come true, so every algorithm refuses up front.
+    """
+    limiter = make_limiter(algorithm)
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        limiter.allow(cost=limiter.limit + 1)
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        limiter.peek(cost=limiter.limit + 1)
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_bool_cost_is_rejected(algorithm: type[RateLimiter]) -> None:
+    """``True`` is an int in Python, but passing it as a cost is a mistake."""
+    limiter = make_limiter(algorithm)
+    with pytest.raises(TypeError, match="cost must be an integer, got bool"):
+        limiter.allow(cost=True)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("algorithm", [TokenBucket, LeakyBucket])
+def test_bucket_config_accessors(algorithm: type[RateLimiter]) -> None:
+    """Bucket algorithms expose the rate and capacity they were built with."""
+    limiter = algorithm(rate=12.5, capacity=30)
+    assert limiter.rate == 12.5
+    assert limiter.capacity == 30
+    assert limiter.limit == 30
+
+
+@pytest.mark.parametrize("algorithm", [FixedWindow, SlidingWindow, SlidingLog])
+def test_window_config_accessors(algorithm: type[RateLimiter]) -> None:
+    """Window algorithms expose the limit and window they were built with."""
+    limiter = algorithm(limit=30, window=12.5)
+    assert limiter.limit == 30
+    assert limiter.window == 12.5
+
+
+# ---------------------------------------------------------------------------
+# Peek on an exhausted limiter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_peek_reports_denial_once_exhausted(algorithm: type[RateLimiter]) -> None:
+    """Peek agrees with allow after capacity is spent, and stays read-only."""
+    limiter = make_limiter(algorithm)
+    limiter.allow(cost=20)
+
+    peeked = limiter.peek()
+    assert peeked.allowed is False
+    assert peeked.remaining == 0
+    assert peeked.retry_after > 0.0, "a denial must say when to come back"
+
+    # Peeking repeatedly must not move the limiter.
+    assert limiter.peek() == peeked or limiter.peek().allowed is False
+    assert limiter.allow().allowed is False, "peek must not have freed capacity"
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_peek_agrees_with_allow(algorithm: type[RateLimiter]) -> None:
+    """Whatever peek predicts, the very next allow delivers."""
+    limiter = make_limiter(algorithm)
+    for _ in range(25):
+        predicted = limiter.peek().allowed
+        assert limiter.allow().allowed is predicted

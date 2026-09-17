@@ -225,3 +225,115 @@ def test_repr() -> None:
     assert "SlidingWindow" in r
     assert "10" in r
     assert "60.0" in r
+
+
+def test_previous_window_is_dropped_after_a_long_idle_gap(clock) -> None:
+    """Skipping two or more windows clears the carried-over count entirely.
+
+    Only the immediately preceding window contributes to the weighted
+    count, so a limiter that sat idle must come back at full capacity
+    rather than dragging a stale counter forward.
+    """
+    limiter = SlidingWindow(limit=5, window=10.0)
+    for _ in range(5):
+        limiter.allow()
+    assert limiter.allow().allowed is False
+
+    clock.advance(25.0)  # more than two whole windows
+
+    assert limiter.remaining() == 5, "a stale window must not be carried forward"
+    for _ in range(5):
+        assert limiter.allow().allowed is True
+
+
+def test_previous_window_is_weighted_after_a_single_window_gap(clock) -> None:
+    """Crossing exactly one boundary carries the previous count, decayed.
+
+    This is what separates a sliding window from a fixed one: capacity
+    returns gradually across the boundary instead of all at once.
+    """
+    limiter = SlidingWindow(limit=10, window=10.0)
+    for _ in range(10):
+        limiter.allow()
+
+    # A quarter past the boundary: 75% of the previous window still counts,
+    # and remaining rounds usage up, so 10 - ceil(7.5).
+    clock.advance(12.5)
+    assert limiter.remaining() == 2
+
+    # Halfway through: half of it counts.
+    clock.advance(2.5)
+    assert limiter.remaining() == 5
+
+    # And at the next boundary it is gone entirely.
+    clock.advance(5.0)
+    assert limiter.remaining() == 10
+
+
+# ---------------------------------------------------------------------------
+# Denials raised after the window has rotated
+# ---------------------------------------------------------------------------
+
+
+def test_retry_after_solves_the_decay_within_the_current_window(clock) -> None:
+    """A denial carried by the *previous* window resolves mid-window.
+
+    The previous window's contribution shrinks continuously, so the moment
+    one more request fits is generally well before the next boundary.
+    Returning the boundary instead is what used to halve the throughput.
+    """
+    limiter = SlidingWindow(limit=10, window=10.0)
+    for _ in range(10):
+        limiter.allow()
+
+    clock.advance(10.0)  # rotate: the 10 requests become the previous window
+
+    denied = limiter.allow()
+    assert denied.allowed is False
+    # Weighted count is 10; one unit frees up once it decays to 9, a tenth
+    # of the way into this window.
+    assert denied.retry_after == pytest.approx(1.0, abs=0.01)
+    assert denied.retry_after < limiter.window
+
+    clock.advance(denied.retry_after)
+    assert limiter.allow().allowed is True
+
+
+def test_retry_after_waits_for_the_boundary_when_this_window_is_full(
+    clock,
+) -> None:
+    """When the current window alone blocks the request, wait for rotation."""
+    limiter = SlidingWindow(limit=10, window=10.0)
+    limiter.allow(cost=5)
+
+    clock.advance(15.0)  # rotate, then halfway in: previous weighs 2.5
+    assert limiter.allow(cost=7).allowed is True
+
+    denied = limiter.allow(cost=3)
+    assert denied.allowed is False
+    assert denied.retry_after == pytest.approx(5.0, abs=0.01), "the boundary"
+
+    clock.advance(denied.retry_after)
+    assert limiter.allow(cost=3).allowed is True
+
+
+def test_reset_after_spans_the_previous_window_only(clock) -> None:
+    """With nothing spent this window, a full reset is one window away."""
+    limiter = SlidingWindow(limit=10, window=10.0)
+    limiter.allow(cost=4)
+
+    clock.advance(10.0)  # rotate: prev=4, curr=0
+
+    assert limiter.reset_after() == pytest.approx(10.0, abs=0.01)
+
+    clock.advance(limiter.reset_after())
+    assert limiter.remaining() == 10
+    assert limiter.reset_after() == 0.0
+
+
+def test_reset_after_spans_two_windows_while_this_one_is_in_use(clock) -> None:
+    """A request made now holds capacity until it has decayed as previous."""
+    limiter = SlidingWindow(limit=10, window=10.0)
+    limiter.allow()
+
+    assert limiter.reset_after() == pytest.approx(20.0, abs=0.01)

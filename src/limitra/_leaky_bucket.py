@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import math
 
-from limitra._base import RateLimiter, RateLimitResult
+from limitra._base import (
+    RateLimiter,
+    RateLimitResult,
+    _check_rate,
+    _check_size,
+    _satisfiable,
+)
 
 
 class LeakyBucket(RateLimiter):
@@ -14,21 +20,36 @@ class LeakyBucket(RateLimiter):
     at a constant ``rate`` (units per second).  A request is denied when
     adding ``cost`` would cause the water level to exceed ``capacity``.
 
-    This algorithm enforces a steady output rate and is ideal for
-    protecting downstream services from traffic spikes.
+    Relationship to :class:`~limitra.TokenBucket`:
+        As an admission control device this is the algebraic dual of the
+        token bucket rather than a different policy: ``capacity - water``
+        tracks the token count exactly, so for the same ``rate`` and
+        ``capacity`` the two admit and deny precisely the same requests.
+        The "smoothing" a leaky bucket is known for belongs to the
+        *queueing* variant, which delays requests instead of refusing
+        them — with allow/deny there is nothing to smooth.
+
+        Pick whichever framing matches how you think about the budget:
+        ``LeakyBucket`` if you reason about how full a queue is,
+        ``TokenBucket`` if you reason about credit you spend and earn back.
+        For genuinely paced output either set ``capacity=1``, so no burst
+        is possible, or call :meth:`~limitra.RateLimiter.wait` and let the
+        limiter space the calls out for you.
 
     Args:
         rate: Drain rate in units per second. Must be positive.
-        capacity: Maximum water level the bucket can hold. Must be
-            at least 1.
+        capacity: Maximum water level the bucket can hold. This is also
+            the largest burst it will admit. Must be at least 1.
 
     Raises:
+        TypeError: If ``rate`` is not a number or ``capacity`` is not an
+            integer.
         ValueError: If ``rate`` or ``capacity`` is out of range.
 
     Example:
+        >>> from limitra import LeakyBucket
         >>> limiter = LeakyBucket(rate=10.0, capacity=100)
-        >>> result = limiter.allow()
-        >>> result.allowed
+        >>> limiter.allow().allowed
         True
     """
 
@@ -42,17 +63,32 @@ class LeakyBucket(RateLimiter):
             capacity: Maximum water level. Must be >= 1.
 
         Raises:
+            TypeError: If ``rate`` is not a number or ``capacity`` is not an
+                integer.
             ValueError: If ``rate`` or ``capacity`` is out of range.
         """
         super().__init__()
-        if rate <= 0:
-            raise ValueError(f"rate must be > 0, got {rate}")
-        if capacity < 1:
-            raise ValueError(f"capacity must be >= 1, got {capacity}")
-        self._rate: float = rate
-        self._capacity: int = capacity
+        self._rate: float = _check_rate(rate)
+        self._capacity: int = _check_size(capacity, "capacity")
         self._water_level: float = 0.0
         self._last_drain: float = self._now()
+
+    # -- configuration ---------------------------------------------------- #
+
+    @property
+    def rate(self) -> float:
+        """Drain rate in units per second."""
+        return self._rate
+
+    @property
+    def capacity(self) -> int:
+        """Maximum water the bucket can hold."""
+        return self._capacity
+
+    @property
+    def limit(self) -> int:
+        """Maximum units admissible at once — an alias for :attr:`capacity`."""
+        return self._capacity
 
     # -- internal helpers ------------------------------------------------- #
 
@@ -104,7 +140,7 @@ class LeakyBucket(RateLimiter):
                 remaining=max(0, self._capacity - math.ceil(self._water_level)),
                 limit=self._capacity,
                 reset_after=max(0.0, self._water_level / self._rate),
-                retry_after=max(0.0, retry),
+                retry_after=_satisfiable(retry),
             )
 
     def _peek_unlocked(self, cost: int = 1) -> RateLimitResult:
@@ -140,7 +176,7 @@ class LeakyBucket(RateLimiter):
             remaining=max(0, self._capacity - math.ceil(self._water_level)),
             limit=self._capacity,
             reset_after=max(0.0, self._water_level / self._rate),
-            retry_after=max(0.0, retry),
+            retry_after=_satisfiable(retry),
         )
 
     def remaining(self) -> int:
@@ -176,6 +212,4 @@ class LeakyBucket(RateLimiter):
 
     def __repr__(self) -> str:
         """Return a debug-friendly string representation."""
-        return (
-            f"LeakyBucket(rate={self._rate}, capacity={self._capacity})"
-        )
+        return f"LeakyBucket(rate={self._rate}, capacity={self._capacity})"

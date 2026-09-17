@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from limitra._base import RateLimiter, RateLimitResult
+from limitra._base import RateLimiter, RateLimitResult, _check_size, _check_window
 
 
 class FixedWindow(RateLimiter):
@@ -15,17 +15,26 @@ class FixedWindow(RateLimiter):
     This is the simplest rate limiting strategy and works well when
     hard per-window caps are required.
 
+    Boundary burst:
+        Because the counter clears all at once, up to ``2 * limit``
+        requests can land inside a single window-length interval that
+        straddles a boundary — ``limit`` at the end of one window and
+        ``limit`` at the start of the next.  Use :class:`SlidingWindow`
+        or :class:`SlidingLog` when that matters.
+
     Args:
         limit: Maximum number of requests per window. Must be at least 1.
         window: Window duration in seconds. Must be positive.
 
     Raises:
+        TypeError: If ``limit`` is not an integer or ``window`` is not a
+            number.
         ValueError: If ``limit`` or ``window`` is out of range.
 
     Example:
+        >>> from limitra import FixedWindow
         >>> limiter = FixedWindow(limit=100, window=60.0)
-        >>> result = limiter.allow()
-        >>> result.allowed
+        >>> limiter.allow().allowed
         True
     """
 
@@ -39,34 +48,63 @@ class FixedWindow(RateLimiter):
             window: Window duration in seconds. Must be > 0.
 
         Raises:
+            TypeError: If ``limit`` is not an integer or ``window`` is not
+                a number.
             ValueError: If ``limit`` or ``window`` is out of range.
         """
         super().__init__()
-        if limit < 1:
-            raise ValueError(f"limit must be >= 1, got {limit}")
-        if window <= 0:
-            raise ValueError(f"window must be > 0, got {window}")
-        self._limit: int = limit
-        self._window: float = window
+        self._limit: int = _check_size(limit, "limit")
+        self._window: float = _check_window(window)
         self._counter: int = 0
         self._window_start: float = self._now()
+
+    # -- configuration ---------------------------------------------------- #
+
+    @property
+    def limit(self) -> int:
+        """Maximum number of requests allowed per window."""
+        return self._limit
+
+    @property
+    def window(self) -> float:
+        """Window duration in seconds."""
+        return self._window
 
     # -- internal helpers ------------------------------------------------- #
 
     def _advance_window(self) -> float:
         """Advance the window if the current one has expired.
 
-        If the current monotonic time is past ``_window_start + _window``,
-        the counter is reset and ``_window_start`` is moved forward.
+        Window boundaries step forward in whole ``window`` multiples from
+        the limiter's construction time, so they depend only on elapsed
+        time.  Re-anchoring to ``now`` instead would let a bystander call —
+        ``remaining()`` from a metrics scrape, say — shift the boundary and
+        change the ``Retry-After`` other callers are given.
 
         Returns:
             The current monotonic time.
         """
         now = self._now()
-        if now >= self._window_start + self._window:
+        elapsed = now - self._window_start
+        if elapsed >= self._window:
             self._counter = 0
-            self._window_start = now
+            self._window_start += (elapsed // self._window) * self._window
         return now
+
+    def _reset_after(self, now: float, counter: int) -> float:
+        """Seconds until the window rolls over, given a counter value.
+
+        Args:
+            now: Current monotonic time.
+            counter: The counter to report against.
+
+        Returns:
+            ``0.0`` when nothing is counted against the window, otherwise
+            the time until it clears.
+        """
+        if counter == 0:
+            return 0.0
+        return max(0.0, (self._window_start + self._window) - now)
 
     # -- public API ------------------------------------------------------- #
 
@@ -80,15 +118,16 @@ class FixedWindow(RateLimiter):
             A :class:`RateLimitResult` with the outcome.
 
         Raises:
-            ValueError: If ``cost`` is less than 1.
-            TypeError: If ``cost`` is not an integer.
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is less than 1 or greater than
+                :attr:`limit`.
         """
         self._validate_cost(cost)
         with self._lock:
             now = self._advance_window()
             if self._counter + cost <= self._limit:
                 self._counter += cost
-                reset = max(0.0, (self._window_start + self._window) - now)
+                reset = self._reset_after(now, self._counter)
                 return RateLimitResult(
                     allowed=True,
                     remaining=max(0, self._limit - self._counter),
@@ -96,7 +135,7 @@ class FixedWindow(RateLimiter):
                     reset_after=reset,
                     retry_after=0.0,
                 )
-            reset = max(0.0, (self._window_start + self._window) - now)
+            reset = self._reset_after(now, self._counter)
             return RateLimitResult(
                 allowed=False,
                 remaining=max(0, self._limit - self._counter),
@@ -106,7 +145,7 @@ class FixedWindow(RateLimiter):
             )
 
     def _peek_unlocked(self, cost: int = 1) -> RateLimitResult:
-        """Check whether ``cost`` requests would fit without recording them.
+        """Report what :meth:`allow` would return, without recording anything.
 
         This method does **not** acquire the lock — it is called from
         :meth:`~RateLimiter.peek` which already holds it.
@@ -118,22 +157,23 @@ class FixedWindow(RateLimiter):
             A :class:`RateLimitResult` representing what *would* happen.
 
         Raises:
-            ValueError: If ``cost`` is less than 1.
-            TypeError: If ``cost`` is not an integer.
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is less than 1 or greater than
+                :attr:`limit`.
         """
         self._validate_cost(cost)
         now = self._advance_window()
         if self._counter + cost <= self._limit:
-            remaining_after = self._limit - (self._counter + cost)
-            reset = max(0.0, (self._window_start + self._window) - now)
+            counter_after = self._counter + cost
+            reset = self._reset_after(now, counter_after)
             return RateLimitResult(
                 allowed=True,
-                remaining=max(0, remaining_after),
+                remaining=max(0, self._limit - counter_after),
                 limit=self._limit,
                 reset_after=reset,
                 retry_after=0.0,
             )
-        reset = max(0.0, (self._window_start + self._window) - now)
+        reset = self._reset_after(now, self._counter)
         return RateLimitResult(
             allowed=False,
             remaining=max(0, self._limit - self._counter),
@@ -153,15 +193,15 @@ class FixedWindow(RateLimiter):
             return max(0, self._limit - self._counter)
 
     def reset_after(self) -> float:
-        """Return seconds until the current window expires.
+        """Return seconds until the window clears.
 
         Returns:
-            Seconds until the window rolls over. Returns ``0.0`` if the
-            window has just started (effectively full capacity).
+            Seconds until the counter rolls over, or ``0.0`` if nothing is
+            counted against the current window.
         """
         with self._lock:
             now = self._advance_window()
-            return max(0.0, (self._window_start + self._window) - now)
+            return self._reset_after(now, self._counter)
 
     def reset(self) -> None:
         """Reset the counter and start a fresh window.
@@ -175,6 +215,4 @@ class FixedWindow(RateLimiter):
 
     def __repr__(self) -> str:
         """Return a debug-friendly string representation."""
-        return (
-            f"FixedWindow(limit={self._limit}, window={self._window})"
-        )
+        return f"FixedWindow(limit={self._limit}, window={self._window})"

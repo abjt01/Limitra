@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+
+      - name: Ruff format
+        run: ruff format --check --diff .
+
+      - name: Mypy
+        run: mypy src/limitra
+
+      - name: Doctests
+        run: pytest --doctest-modules src/limitra -o addopts=''
+
+  test:
+    name: Test ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Free-threaded: the exact-count concurrency assertions are a real
+          # test of the locking once the GIL is not covering for it.
+          - os: ubuntu-latest
+            python-version: "3.14t"
+          # The limiters are timing sensitive, so cover the other platforms
+          # too rather than trusting Linux alone.
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest --cov=limitra --cov-report=term-missing --cov-fail-under=98
+
+  package:
+    name: Build and check distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build tooling
+        run: pip install build twine
+
+      - name: Build
+        run: python -m build
+
+      - name: Check metadata renders on PyPI
+        run: twine check --strict dist/*
+
+      - name: Verify the wheel installs and imports cleanly
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install dist/*.whl
+          /tmp/check/bin/python -c "
+          import limitra
+          print('version', limitra.__version__)
+          assert limitra.TokenBucket(rate=10.0, capacity=5).allow().allowed
+          "

@@ -4,6 +4,9 @@ on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distribution
@@ -17,11 +20,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build
-        run: pip install build
+      - name: Install build tooling
+        run: pip install build twine
 
       - name: Build package
         run: python -m build
+
+      - name: Check metadata renders on PyPI
+        run: twine check --strict dist/*
+
+      - name: Verify the tag matches the package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/limitra/__init__.py').read_text()).group(1))")
+          if [ "$tag" != "$version" ]; then
+            echo "release tag '$tag' does not match limitra.__version__ '$version'" >&2
+            exit 1
+          fi
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4

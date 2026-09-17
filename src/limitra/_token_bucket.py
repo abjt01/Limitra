@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from limitra._base import RateLimiter, RateLimitResult
+from limitra._base import (
+    RateLimiter,
+    RateLimitResult,
+    _check_rate,
+    _check_size,
+    _satisfiable,
+)
 
 
 class TokenBucket(RateLimiter):
@@ -24,9 +30,9 @@ class TokenBucket(RateLimiter):
         ValueError: If ``rate`` or ``capacity`` is out of range.
 
     Example:
+        >>> from limitra import TokenBucket
         >>> limiter = TokenBucket(rate=10.0, capacity=100)
-        >>> result = limiter.allow()
-        >>> result.allowed
+        >>> limiter.allow().allowed
         True
     """
 
@@ -40,17 +46,32 @@ class TokenBucket(RateLimiter):
             capacity: Maximum tokens the bucket can hold. Must be >= 1.
 
         Raises:
+            TypeError: If ``rate`` is not a number or ``capacity`` is not an
+                integer.
             ValueError: If ``rate`` or ``capacity`` is out of range.
         """
         super().__init__()
-        if rate <= 0:
-            raise ValueError(f"rate must be > 0, got {rate}")
-        if capacity < 1:
-            raise ValueError(f"capacity must be >= 1, got {capacity}")
-        self._rate: float = rate
-        self._capacity: int = capacity
+        self._rate: float = _check_rate(rate)
+        self._capacity: int = _check_size(capacity, "capacity")
         self._tokens: float = float(capacity)
         self._last_refill: float = self._now()
+
+    # -- configuration ---------------------------------------------------- #
+
+    @property
+    def rate(self) -> float:
+        """Tokens added per second."""
+        return self._rate
+
+    @property
+    def capacity(self) -> int:
+        """Maximum tokens the bucket can hold."""
+        return self._capacity
+
+    @property
+    def limit(self) -> int:
+        """Maximum units admissible at once — an alias for :attr:`capacity`."""
+        return self._capacity
 
     # -- internal helpers ------------------------------------------------- #
 
@@ -97,7 +118,7 @@ class TokenBucket(RateLimiter):
                 remaining=max(0, int(self._tokens)),
                 limit=self._capacity,
                 reset_after=max(0.0, (self._capacity - self._tokens) / self._rate),
-                retry_after=max(0.0, (cost - self._tokens) / self._rate),
+                retry_after=_satisfiable((cost - self._tokens) / self._rate),
             )
 
     def _peek_unlocked(self, cost: int = 1) -> RateLimitResult:
@@ -132,7 +153,7 @@ class TokenBucket(RateLimiter):
             remaining=max(0, int(self._tokens)),
             limit=self._capacity,
             reset_after=max(0.0, (self._capacity - self._tokens) / self._rate),
-            retry_after=max(0.0, (cost - self._tokens) / self._rate),
+            retry_after=_satisfiable((cost - self._tokens) / self._rate),
         )
 
     def remaining(self) -> int:
@@ -168,6 +189,4 @@ class TokenBucket(RateLimiter):
 
     def __repr__(self) -> str:
         """Return a debug-friendly string representation."""
-        return (
-            f"TokenBucket(rate={self._rate}, capacity={self._capacity})"
-        )
+        return f"TokenBucket(rate={self._rate}, capacity={self._capacity})"

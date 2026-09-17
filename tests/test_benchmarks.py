@@ -1,117 +1,123 @@
 """Performance benchmarks for all rate limiting algorithms.
 
-These tests measure throughput (ops/sec) and assert a minimum sanity floor
-of 10,000 ops/sec.  Run with ``pytest -s`` to see printed throughput figures.
+These are opt-in — they are deselected by default and run with
+``pytest -m benchmark -s``, which also prints the throughput figures.
+Wall-clock numbers are far too noisy on a shared CI runner to gate a pull
+request on, so the absolute floor here is deliberately generous and the
+assertion that actually protects anything is the *scaling* check at the
+bottom, which compares a limiter against itself.
 """
 
 from __future__ import annotations
 
 import time
 
+import pytest
+
 from limitra import (
     FixedWindow,
     LeakyBucket,
+    RateLimiter,
     SlidingLog,
     SlidingWindow,
     TokenBucket,
 )
+
+pytestmark = pytest.mark.benchmark
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 BENCH_OPS = 100_000
-BENCH_OPS_LOG = 10_000  # SlidingLog is O(n) per call — use smaller N
-MIN_THROUGHPUT = 10_000  # sanity floor: ops/sec
+
+#: Low enough that only a real regression trips it. The library does
+#: hundreds of thousands of ops/sec on ordinary hardware; this is a floor,
+#: not a target.
+MIN_THROUGHPUT = 5_000
+
+ALL_ALGORITHMS = [TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingLog]
 
 
 # ---------------------------------------------------------------------------
-# Individual benchmarks
+# Helpers
 # ---------------------------------------------------------------------------
 
-def test_token_bucket_throughput() -> None:
-    """Time 100k allow() calls on TokenBucket, print ops/sec."""
-    limiter = TokenBucket(rate=1_000_000.0, capacity=1_000_000)
+
+def make_limiter(cls: type[RateLimiter], size: int) -> RateLimiter:
+    """Build any algorithm with enough headroom that nothing is denied."""
+    if cls in (TokenBucket, LeakyBucket):
+        return cls(rate=float(size), capacity=size)
+    return cls(limit=size, window=999.0)
+
+
+def throughput(limiter: RateLimiter, ops: int) -> float:
+    """Return ops/sec for ``ops`` consecutive allow() calls."""
     start = time.perf_counter()
-    for _ in range(BENCH_OPS):
+    for _ in range(ops):
         limiter.allow()
     elapsed = time.perf_counter() - start
-    ops_per_sec = BENCH_OPS / elapsed
-    print(f"\n  TokenBucket:    {ops_per_sec:>12,.0f} ops/sec  ({elapsed:.3f}s)")
-    assert ops_per_sec > MIN_THROUGHPUT
+    return ops / elapsed
 
 
-def test_leaky_bucket_throughput() -> None:
-    """Time 100k allow() calls on LeakyBucket, print ops/sec."""
-    limiter = LeakyBucket(rate=1_000_000.0, capacity=1_000_000)
-    start = time.perf_counter()
-    for _ in range(BENCH_OPS):
-        limiter.allow()
-    elapsed = time.perf_counter() - start
-    ops_per_sec = BENCH_OPS / elapsed
-    print(f"\n  LeakyBucket:    {ops_per_sec:>12,.0f} ops/sec  ({elapsed:.3f}s)")
-    assert ops_per_sec > MIN_THROUGHPUT
+# ---------------------------------------------------------------------------
+# Throughput
+# ---------------------------------------------------------------------------
 
 
-def test_fixed_window_throughput() -> None:
-    """Time 100k allow() calls on FixedWindow, print ops/sec."""
-    limiter = FixedWindow(limit=1_000_000, window=999.0)
-    start = time.perf_counter()
-    for _ in range(BENCH_OPS):
-        limiter.allow()
-    elapsed = time.perf_counter() - start
-    ops_per_sec = BENCH_OPS / elapsed
-    print(f"\n  FixedWindow:    {ops_per_sec:>12,.0f} ops/sec  ({elapsed:.3f}s)")
-    assert ops_per_sec > MIN_THROUGHPUT
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_throughput(algorithm: type[RateLimiter]) -> None:
+    """Every algorithm clears the throughput floor at the same N.
+
+    All five are measured at ``BENCH_OPS``; giving one of them a smaller N
+    would let it clear the floor on work the others are not doing.
+    """
+    limiter = make_limiter(algorithm, BENCH_OPS)
+    ops_per_sec = throughput(limiter, BENCH_OPS)
+    print(f"\n  {algorithm.__name__:<16s} {ops_per_sec:>12,.0f} ops/sec")
+    assert ops_per_sec > MIN_THROUGHPUT, (
+        f"{algorithm.__name__} managed {ops_per_sec:,.0f} ops/sec, below the "
+        f"floor of {MIN_THROUGHPUT:,}"
+    )
 
 
-def test_sliding_window_throughput() -> None:
-    """Time 100k allow() calls on SlidingWindow, print ops/sec."""
-    limiter = SlidingWindow(limit=1_000_000, window=999.0)
-    start = time.perf_counter()
-    for _ in range(BENCH_OPS):
-        limiter.allow()
-    elapsed = time.perf_counter() - start
-    ops_per_sec = BENCH_OPS / elapsed
-    print(f"\n  SlidingWindow:  {ops_per_sec:>12,.0f} ops/sec  ({elapsed:.3f}s)")
-    assert ops_per_sec > MIN_THROUGHPUT
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_throughput_when_saturated(algorithm: type[RateLimiter]) -> None:
+    """The denied path is the hot one under abuse, so measure it too."""
+    limiter = make_limiter(algorithm, 1_000)
+    while limiter.allow().allowed:
+        pass
 
-
-def test_sliding_log_throughput() -> None:
-    """Time 10k allow() calls on SlidingLog (O(n) log), print ops/sec."""
-    limiter = SlidingLog(limit=1_000_000, window=999.0)
-    start = time.perf_counter()
-    for _ in range(BENCH_OPS_LOG):
-        limiter.allow()
-    elapsed = time.perf_counter() - start
-    ops_per_sec = BENCH_OPS_LOG / elapsed
-    print(f"\n  SlidingLog:     {ops_per_sec:>12,.0f} ops/sec  ({elapsed:.3f}s)")
+    ops_per_sec = throughput(limiter, 20_000)
+    print(f"\n  {algorithm.__name__:<16s} {ops_per_sec:>12,.0f} ops/sec (denying)")
     assert ops_per_sec > MIN_THROUGHPUT
 
 
 # ---------------------------------------------------------------------------
-# Aggregate sanity check
+# Scaling
 # ---------------------------------------------------------------------------
 
-def test_all_algorithms_minimum_throughput() -> None:
-    """Assert ALL algorithms can do at least 10,000 ops/sec."""
-    configs = [
-        ("TokenBucket", TokenBucket(rate=1e6, capacity=1_000_000), BENCH_OPS),
-        ("LeakyBucket", LeakyBucket(rate=1e6, capacity=1_000_000), BENCH_OPS),
-        ("FixedWindow", FixedWindow(limit=1_000_000, window=999.0), BENCH_OPS),
-        ("SlidingWindow", SlidingWindow(limit=1_000_000, window=999.0), BENCH_OPS),
-        ("SlidingLog", SlidingLog(limit=1_000_000, window=999.0), BENCH_OPS_LOG),
-    ]
 
-    print()  # blank line for readability with -s
-    for name, limiter, ops in configs:
-        start = time.perf_counter()
-        for _ in range(ops):
-            limiter.allow()
-        elapsed = time.perf_counter() - start
-        ops_per_sec = ops / elapsed
-        print(f"  {name:<16s} {ops_per_sec:>12,.0f} ops/sec")
-        assert ops_per_sec > MIN_THROUGHPUT, (
-            f"{name} throughput {ops_per_sec:,.0f} ops/sec is below "
-            f"minimum floor of {MIN_THROUGHPUT:,} ops/sec"
-        )
+def test_sliding_log_cost_per_call_does_not_grow_with_the_log() -> None:
+    """SlidingLog must stay flat per call as its log gets longer.
+
+    Pruning used to rebuild the whole list on every call, which made each
+    call O(n) and a full window O(n^2). This compares the limiter against
+    itself at two sizes, so it holds regardless of how fast the machine is.
+    """
+    small = SlidingLog(limit=2_000, window=999.0)
+    large = SlidingLog(limit=20_000, window=999.0)
+    for limiter in (small, large):
+        while limiter.allow().allowed:
+            pass
+
+    probes = 20_000
+    per_call_small = 1.0 / throughput(small, probes)
+    per_call_large = 1.0 / throughput(large, probes)
+    ratio = per_call_large / per_call_small
+
+    print(f"\n  SlidingLog 10x longer log -> {ratio:.2f}x cost per call")
+    assert ratio < 4.0, (
+        f"a 10x longer log made each call {ratio:.1f}x more expensive; "
+        f"pruning looks linear in the log length again"
+    )

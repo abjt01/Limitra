@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "abjt-limitter"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A modern Python library for rate limiting algorithms"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     { name = "abjt01" },
@@ -31,6 +32,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Internet :: WWW/HTTP",
@@ -41,7 +43,7 @@ Homepage = "https://github.com/abjt01/Limitra"
 Documentation = "https://github.com/abjt01/Limitra#readme"
 Repository = "https://github.com/abjt01/Limitra"
 Issues = "https://github.com/abjt01/Limitra/issues"
-Changelog = "https://pypi.org/project/abjt-limitter/#history"
+Changelog = "https://github.com/abjt01/Limitra/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -51,6 +53,9 @@ dev = [
     "ruff>=0.5",
 ]
 
+[tool.setuptools.dynamic]
+version = { attr = "limitra.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -58,6 +63,7 @@ where = ["src"]
 limitra = ["py.typed"]
 
 [tool.mypy]
+python_version = "3.10"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -83,19 +89,26 @@ select = [
     "UP",   # pyupgrade
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
-    "TCH",  # flake8-type-checking
+    "TC",   # flake8-type-checking
     "RUF",  # ruff-specific rules
 ]
 ignore = [
     "D100",   # missing docstring in public module
     "D104",   # missing docstring in public package
-    "TCH001", # move import into type-checking block (false positive for runtime use)
-    "TCH",    # all type-checking block rules (imports are used at runtime)
+    "TC001",  # runtime-used imports must not move into a type-checking block
 ]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.coverage.run]
+source = ["limitra"]
+branch = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+# Benchmarks are wall-clock sensitive; run them with `pytest -m benchmark -s`.
+addopts = "-v --tb=short -m 'not benchmark'"
+markers = [
+    "benchmark: throughput and scaling measurements, deselected by default",
+]

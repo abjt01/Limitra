@@ -111,10 +111,12 @@ def test_cost_parameter():
 
 
 def test_cost_exceeds_capacity():
-    """A cost greater than capacity is denied (but is a valid cost value)."""
+    """A cost greater than capacity is rejected — it could never be satisfied."""
     limiter = TokenBucket(rate=1.0, capacity=5)
-    result = limiter.allow(cost=6)
-    assert result.allowed is False
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        limiter.allow(cost=6)
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        limiter.peek(cost=6)
 
 
 def test_cost_validation():
