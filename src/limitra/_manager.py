@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from collections import OrderedDict
@@ -49,14 +50,17 @@ class RateLimitManager:
         algorithm: A :class:`RateLimiter` subclass to instantiate per key.
         max_keys: Maximum number of keys to track. When the map is full,
             adding a new key evicts one. ``None`` (the default) means
-            unbounded.
+            unbounded. This name belongs to the manager, so an algorithm
+            that declares a ``max_keys`` parameter of its own is rejected
+            rather than silently denied one.
         **kwargs: Keyword arguments forwarded to ``algorithm(...)`` when
             creating new limiter instances. They are validated once here,
             by building a limiter, rather than on the first request.
 
     Raises:
         TypeError: If ``algorithm`` is not a :class:`RateLimiter` subclass,
-            or ``kwargs`` does not match its signature.
+            declares a conflicting ``max_keys`` parameter, or ``kwargs``
+            does not match its signature.
         ValueError: If ``max_keys`` is less than 1, or ``kwargs`` holds an
             out-of-range value for the algorithm.
 
@@ -89,6 +93,15 @@ class RateLimitManager:
         if not (isinstance(algorithm, type) and issubclass(algorithm, RateLimiter)):
             raise TypeError(
                 f"algorithm must be a RateLimiter subclass, got {algorithm!r}"
+            )
+        # `max_keys` belongs to the manager, so an algorithm that takes a
+        # parameter of the same name could never be given one: it would be
+        # swallowed here without a word. Say so instead.
+        if "max_keys" in inspect.signature(algorithm).parameters:
+            raise TypeError(
+                f"{algorithm.__name__} takes its own 'max_keys' parameter, which "
+                f"collides with the manager's. Wrap it in a subclass that renames "
+                f"the parameter, or use functools.partial, and pass that instead."
             )
         self._algorithm = algorithm
         self._kwargs = kwargs

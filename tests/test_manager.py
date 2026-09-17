@@ -671,3 +671,20 @@ def test_cleanup_drops_a_key_idle_for_exactly_max_idle(clock) -> None:
     clock.advance(30.0)
 
     assert mgr.cleanup(max_idle=30.0) == 1
+
+
+def test_algorithm_taking_its_own_max_keys_is_rejected() -> None:
+    """The manager owns the name, so a collision must not pass unnoticed.
+
+    ``max_keys`` is consumed by the manager, so an algorithm declaring a
+    parameter of that name could never be given one — it would be swallowed
+    without a word.
+    """
+
+    class Quota(TokenBucket):
+        def __init__(self, rate: float, capacity: int, max_keys: int = 1) -> None:
+            super().__init__(rate=rate, capacity=capacity)
+            self.max_keys = max_keys
+
+    with pytest.raises(TypeError, match="takes its own 'max_keys' parameter"):
+        RateLimitManager(Quota, rate=10.0, capacity=5)

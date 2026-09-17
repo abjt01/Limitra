@@ -31,10 +31,11 @@ pytestmark = pytest.mark.benchmark
 
 BENCH_OPS = 100_000
 
-#: Low enough that only a real regression trips it. The library does
-#: hundreds of thousands of ops/sec on ordinary hardware; this is a floor,
-#: not a target.
-MIN_THROUGHPUT = 5_000
+#: A floor low enough that nothing could ever trip it guards nothing. All
+#: five algorithms do 800k+ ops/sec on ordinary hardware and several
+#: hundred thousand on a shared runner, so this catches roughly an order of
+#: magnitude of regression while leaving ample headroom for a slow machine.
+MIN_THROUGHPUT = 50_000
 
 ALL_ALGORITHMS = [TokenBucket, LeakyBucket, FixedWindow, SlidingWindow, SlidingLog]
 

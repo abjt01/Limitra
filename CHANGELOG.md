@@ -100,6 +100,12 @@ For anyone subclassing `RateLimiter` directly:
   reference to the same timestamp list. `copy.deepcopy()` and `pickle`
   failed outright with `cannot pickle '_thread.lock' object`. All three now
   work and produce an independent limiter.
+- **`cleanup(max_idle=0)` did nothing on Windows.** `time.monotonic()`
+  advances in ~15.6ms steps there, so a key touched and swept inside one
+  tick has an idle time of exactly `0.0`; testing it with `>` meant the
+  documented "drop everything not in use right now" dropped nothing, and
+  the key map grew unbounded on the platform where that is hardest to
+  notice.
 - **The package could not be built at all.** `requires =
   ["setuptools>=61.0"]` combined with the PEP 639 `license = "MIT"`
   expression, which needs setuptools 77.0.3; anything older failed with a
@@ -130,7 +136,12 @@ For anyone subclassing `RateLimiter` directly:
 - The manager's read-only methods — `peek`, `remaining`, `reset_after`,
   `get` — no longer create a key. Only `allow`, `wait` and `wait_async` do.
 - `RateLimitManager` builds one limiter at construction, so a mistyped
-  keyword argument fails immediately instead of inside the first request.
+  keyword argument fails immediately instead of inside the first request,
+  and an algorithm declaring its own `max_keys` parameter is rejected
+  rather than silently denied one.
+- `ruff` is pinned exactly in the dev dependencies. A floating formatter
+  reformats the tree out from under CI on its next release, which is
+  exactly what happened.
 - `LeakyBucket`'s documentation no longer claims a behaviour it does not
   have. As admission control it is the token bucket's dual and admits
   exactly the same requests; the docs now say so and explain how to get
@@ -178,7 +189,7 @@ For anyone subclassing `RateLimiter` directly:
   regression regardless of how fast the machine is.
 - Timing-dependent tests run on a controllable clock instead of `sleep`,
   making the decay and retry maths exact.
-- Coverage is 100% of statements and branches across 520 tests, and the
+- Coverage is 100% of statements and branches across 523 tests, and the
   suite passes on Python 3.10 through 3.14 and on free-threaded 3.14t, where the GIL is not
   there to cover for a missing lock.
 
