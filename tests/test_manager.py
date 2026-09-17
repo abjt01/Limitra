@@ -550,3 +550,32 @@ def test_wait_validates_cost_before_creating_a_key() -> None:
     with pytest.raises(ValueError, match="cost must be <= limit"):
         mgr.wait("user-1", cost=99)
     assert len(mgr) == 0
+
+
+def test_manager_refund_credits_one_key() -> None:
+    """refund(key) gives capacity back to that key alone."""
+    mgr = RateLimitManager(FixedWindow, limit=2, window=60.0)
+    for key in ("user-1", "user-2"):
+        mgr.allow(key)
+        mgr.allow(key)
+        assert mgr.allow(key).allowed is False
+
+    assert mgr.refund("user-1") is True
+
+    assert mgr.allow("user-1").allowed is True
+    assert mgr.allow("user-2").allowed is False, "user-2 must be untouched"
+
+
+def test_manager_refund_ignores_untracked_keys() -> None:
+    """There is nothing to credit back to a key that never spent anything."""
+    mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
+    assert mgr.refund("never-seen") is False
+    assert len(mgr) == 0
+
+
+def test_manager_refund_validates_cost() -> None:
+    """An impossible refund is rejected without touching the map."""
+    mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        mgr.refund("user-1", cost=99)
+    assert len(mgr) == 0

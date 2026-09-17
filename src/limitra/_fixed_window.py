@@ -203,6 +203,21 @@ class FixedWindow(RateLimiter):
             now = self._advance_window()
             return self._reset_after(now, self._counter)
 
+    def refund(self, cost: int = 1) -> None:
+        """Take ``cost`` back off this window's counter.
+
+        Args:
+            cost: Number of requests to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range.
+        """
+        self._validate_cost(cost)
+        with self._lock:
+            self._advance_window()
+            self._counter = max(0, self._counter - cost)
+
     def reset(self) -> None:
         """Reset the counter and start a fresh window.
 

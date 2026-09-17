@@ -229,6 +229,24 @@ class SlidingLog(RateLimiter):
             self._prune(now)
             return self._reset_after(now, self._log[-1] if self._log else None)
 
+    def refund(self, cost: int = 1) -> None:
+        """Drop the ``cost`` most recent timestamps from the log.
+
+        Args:
+            cost: Number of requests to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range.
+        """
+        self._validate_cost(cost)
+        with self._lock:
+            self._prune(self._now())
+            if cost >= len(self._log):
+                self._log.clear()
+            else:
+                del self._log[-cost:]
+
     def reset(self) -> None:
         """Reset the limiter to its initial state."""
         with self._lock:

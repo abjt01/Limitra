@@ -7,7 +7,10 @@ approximate.
 
 from __future__ import annotations
 
+import copy
 import math
+import pickle
+import weakref
 
 import pytest
 
@@ -335,3 +338,142 @@ def test_satisfiable_nudges_a_wait_past_the_boundary() -> None:
 def test_satisfiable_never_returns_a_negative_wait(value: float) -> None:
     """Nothing is ever asked to wait a negative amount of time."""
     assert _satisfiable(value) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# refund
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_refund_returns_spent_capacity(algorithm: type[RateLimiter]) -> None:
+    """What refund() gives back, the next allow() can spend."""
+    limiter = make_limiter(algorithm)
+    limiter.allow(cost=4)
+    assert limiter.remaining() == LIMIT - 4
+
+    limiter.refund(4)
+
+    assert limiter.remaining() == LIMIT
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_refund_unblocks_an_exhausted_limiter(
+    algorithm: type[RateLimiter],
+) -> None:
+    """Crediting back one unit admits exactly one more request."""
+    limiter = make_limiter(algorithm)
+    for _ in range(LIMIT):
+        limiter.allow()
+    assert limiter.allow().allowed is False
+
+    limiter.refund()
+
+    assert limiter.allow().allowed is True
+    assert limiter.allow().allowed is False, "only the refunded unit came back"
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_refund_is_clamped_not_an_error(algorithm: type[RateLimiter]) -> None:
+    """Over-refunding cannot push a limiter past full capacity.
+
+    A caller cannot easily know how much is still outstanding, so handing
+    back too much is clamped rather than rejected.
+    """
+    limiter = make_limiter(algorithm)
+    limiter.allow()
+
+    limiter.refund(LIMIT)
+
+    assert limiter.remaining() == LIMIT
+    assert sum(1 for _ in range(LIMIT * 2) if limiter.allow().allowed) == LIMIT
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_refund_validates_cost(algorithm: type[RateLimiter]) -> None:
+    """refund() applies the same cost rules as allow()."""
+    limiter = make_limiter(algorithm)
+    with pytest.raises(ValueError, match="cost must be >= 1"):
+        limiter.refund(0)
+    with pytest.raises(ValueError, match="cost must be <= limit"):
+        limiter.refund(LIMIT + 1)
+    with pytest.raises(TypeError):
+        limiter.refund(True)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_refund_on_an_untouched_limiter_is_a_no_op(
+    algorithm: type[RateLimiter],
+) -> None:
+    """Crediting a limiter that owes nothing changes nothing."""
+    limiter = make_limiter(algorithm)
+    limiter.refund(LIMIT)
+    assert limiter.remaining() == LIMIT
+    assert limiter.reset_after() == 0.0
+
+
+def test_refund_makes_two_tier_limits_composable() -> None:
+    """The case refund() exists for: a burst tier and a sustained tier.
+
+    Without it the burst tier is charged for requests the sustained tier
+    rejected, so a request that was never served still erodes the budget.
+    """
+    burst = TokenBucket(rate=10.0, capacity=10)
+    sustained = TokenBucket(rate=1.0, capacity=3)
+
+    served = 0
+    for _ in range(6):
+        if not burst.allow().allowed:
+            continue
+        if sustained.allow().allowed:
+            served += 1
+        else:
+            burst.refund()
+
+    assert served == 3
+    assert burst.remaining() == 10 - served, "burst tier charged only for served"
+
+
+# ---------------------------------------------------------------------------
+# Copying
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_copy_gets_its_own_lock_and_state(algorithm: type[RateLimiter]) -> None:
+    """A copy must be independent, not a second handle on one lock.
+
+    Slot-copying used to carry the ``threading.Lock`` across, leaving two
+    limiters with separate budgets guarded by a single lock.
+    """
+    original = make_limiter(algorithm)
+    original.allow(cost=4)
+
+    duplicate = copy.copy(original)
+
+    assert duplicate._lock is not original._lock
+    assert duplicate.remaining() == original.remaining()
+
+    duplicate.allow(cost=LIMIT - 4)
+    assert duplicate.remaining() == 0
+    assert original.remaining() == LIMIT - 4, "the copy must not spend the original"
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_deepcopy_and_pickle_round_trip(algorithm: type[RateLimiter]) -> None:
+    """Both used to fail with an opaque ``cannot pickle '_thread.lock'``."""
+    original = make_limiter(algorithm)
+    original.allow(cost=3)
+
+    for clone in (copy.deepcopy(original), pickle.loads(pickle.dumps(original))):
+        assert clone.remaining() == LIMIT - 3
+        assert clone.limit == original.limit
+        assert clone._lock is not original._lock
+        assert clone.allow().allowed is True
+
+
+@pytest.mark.parametrize("algorithm", ALL_ALGORITHMS)
+def test_copies_are_weak_referenceable(algorithm: type[RateLimiter]) -> None:
+    """Limiters can live in a WeakValueDictionary."""
+    limiter = make_limiter(algorithm)
+    assert weakref.ref(limiter)() is limiter

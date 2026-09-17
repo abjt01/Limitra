@@ -200,6 +200,21 @@ class LeakyBucket(RateLimiter):
             self._drain()
             return max(0.0, self._water_level / self._rate)
 
+    def refund(self, cost: int = 1) -> None:
+        """Remove ``cost`` units of water, never going below empty.
+
+        Args:
+            cost: Number of units to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range.
+        """
+        self._validate_cost(cost)
+        with self._lock:
+            self._drain()
+            self._water_level = max(0.0, self._water_level - cost)
+
     def reset(self) -> None:
         """Reset the bucket to empty.
 

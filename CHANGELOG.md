@@ -58,6 +58,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **An invalid request could evict a valid key.** The manager validated
   `cost` only after creating the key, so a rejected request still displaced
   a real user under `max_keys`.
+- **`copy.copy()` produced a broken limiter.** Slot-copying carried the
+  `threading.Lock` across, so the copy and the original had independent
+  budgets guarded by a single lock, and `SlidingLog` handed its copy a
+  reference to the same timestamp list. `copy.deepcopy()` and `pickle`
+  failed outright with `cannot pickle '_thread.lock' object`. All three now
+  work and produce an independent limiter.
 - **The package could not be built at all.** `requires =
   ["setuptools>=61.0"]` combined with the PEP 639 `license = "MIT"`
   expression, which needs setuptools 77.0.3; anything older failed with a
@@ -98,6 +104,11 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   busy-looping, and never holding the lock while it sleeps.
 - `RateLimiter.wait_async(...)`, the asyncio counterpart, which yields to
   the event loop rather than blocking it.
+- `RateLimiter.refund(cost=1)` returns capacity consumed by an `allow()`
+  whose request was never served. Without it, stacking a burst tier and a
+  sustained tier charges the burst tier for requests the sustained tier
+  rejected — a request that was never served still eroded the budget.
+  `RateLimitManager.refund(key, cost=1)` does the same per key.
 - `RateLimitResult.as_headers()` for HTTP responses.
 - Limiters expose the configuration they were built with: `rate` and
   `capacity` on the buckets, `limit` and `window` on the windows, and
@@ -125,7 +136,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   regression regardless of how fast the machine is.
 - Timing-dependent tests run on a controllable clock instead of `sleep`,
   making the decay and retry maths exact.
-- Coverage is 100% of statements and branches.
+- Coverage is 100% of statements and branches, and the suite passes on
+  Python 3.10 through 3.14 and on free-threaded 3.14t, where the GIL is not
+  there to cover for a missing lock.
 
 ## [0.1.0] — 2026-07-12
 

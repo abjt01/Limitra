@@ -278,6 +278,27 @@ class SlidingWindow(RateLimiter):
             self._advance(now)
             return self._reset_after(now, self._prev_counter, self._curr_counter)
 
+    def refund(self, cost: int = 1) -> None:
+        """Take ``cost`` back off the counters, most recent window first.
+
+        Anything left over after emptying the current window comes off the
+        previous one, since a request made just before the boundary is
+        counted there.
+
+        Args:
+            cost: Number of requests to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range.
+        """
+        self._validate_cost(cost)
+        with self._lock:
+            self._advance(self._now())
+            from_current = min(cost, self._curr_counter)
+            self._curr_counter -= from_current
+            self._prev_counter = max(0, self._prev_counter - (cost - from_current))
+
     def reset(self) -> None:
         """Reset the limiter to its initial state."""
         with self._lock:

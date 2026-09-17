@@ -177,6 +177,21 @@ class TokenBucket(RateLimiter):
             self._refill()
             return max(0.0, (self._capacity - self._tokens) / self._rate)
 
+    def refund(self, cost: int = 1) -> None:
+        """Return ``cost`` tokens to the bucket, never exceeding capacity.
+
+        Args:
+            cost: Number of tokens to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range.
+        """
+        self._validate_cost(cost)
+        with self._lock:
+            self._refill()
+            self._tokens = min(self._capacity, self._tokens + cost)
+
     def reset(self) -> None:
         """Reset the bucket to full capacity.
 

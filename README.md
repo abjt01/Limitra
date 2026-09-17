@@ -96,8 +96,24 @@ limiter.peek()             # what would allow() say? doesn't spend anything
 limiter.remaining()        # units available right now
 limiter.reset_after()      # seconds until back to full
 limiter.reset()            # wipe it back to a fresh limiter
+limiter.refund(cost=5)     # give back capacity you didn't end up using
 limiter.limit              # the largest cost this limiter could ever admit
 ```
+
+`refund()` is what makes stacked limits work. Almost every real API has
+two — a burst tier and a sustained one — and without a refund the first
+tier is charged for requests the second one rejected:
+
+```python
+if burst.allow().allowed:
+    if sustained.allow().allowed:
+        serve()
+    else:
+        burst.refund()      # never served it, don't charge for it
+```
+
+Limiters copy cleanly too: `copy.copy()` gives you an independent limiter
+with its own lock, rather than a second handle on the same one.
 
 `peek()` returns exactly what the next `allow()` would, including the
 `remaining` you'd be left with.

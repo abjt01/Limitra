@@ -313,6 +313,32 @@ class RateLimitManager:
         entry[0].reset()
         return True
 
+    def refund(self, key: str, cost: int = 1) -> bool:
+        """Give ``cost`` units back to *key*'s limiter.
+
+        Does not start tracking an unknown key — there is nothing to credit
+        back to a key that has never spent anything.
+
+        Args:
+            key: The rate-limit key.
+            cost: Number of units to return. Defaults to 1.
+
+        Returns:
+            ``True`` if the key was tracked and was credited, ``False``
+            otherwise.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is out of range for the algorithm.
+        """
+        self._probe._validate_cost(cost)
+        with self._lock:
+            entry = self._entries.get(key)
+        if entry is None:
+            return False
+        entry[0].refund(cost)
+        return True
+
     def get(self, key: str) -> RateLimiter | None:
         """Return the limiter for *key*, or ``None`` if not tracked.
 

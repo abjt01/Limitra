@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 #: Floor for :meth:`RateLimiter.wait` sleeps, so an optimistic ``retry_after``
 #: of ``0.0`` cannot turn the wait loop into a busy spin.
 _MIN_WAIT_SLEEP = 0.001
+
+#: Slots that must never be carried into a copy: a lock cannot be shared
+#: between two limiters, and weak references belong to the original.
+_UNCOPIED_SLOTS = frozenset({"_lock", "__weakref__"})
 
 
 def _satisfiable(seconds: float) -> float:
@@ -291,6 +297,35 @@ class RateLimiter(ABC):
         """
 
     @abstractmethod
+    def refund(self, cost: int = 1) -> None:
+        """Give back ``cost`` units consumed by an earlier :meth:`allow`.
+
+        Use this when a request was admitted but then not served — most
+        often because a second limiter denied it. Without it, stacking a
+        burst tier and a sustained tier charges the first tier for requests
+        the second one rejected::
+
+            if burst.allow().allowed:
+                if sustained.allow().allowed:
+                    serve()
+                else:
+                    burst.refund()
+
+        Refunding more than was spent is clamped rather than treated as an
+        error, since a caller cannot easily know what is still outstanding.
+        Refund promptly: once a window has rolled over there is nothing
+        left to credit back.
+
+        Args:
+            cost: Number of units to return. Defaults to 1.
+
+        Raises:
+            TypeError: If ``cost`` is not an integer, or is a ``bool``.
+            ValueError: If ``cost`` is less than 1 or greater than
+                :attr:`limit`.
+        """
+
+    @abstractmethod
     def reset(self) -> None:
         """Reset the limiter to its initial state.
 
@@ -404,6 +439,54 @@ class RateLimiter(ABC):
         if left <= 0:
             return None
         return min(delay, left)
+
+    # -- copying ---------------------------------------------------------- #
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return the limiter's state, minus its lock.
+
+        A ``threading.Lock`` cannot be copied or pickled, and sharing one
+        between a limiter and its copy would leave two independent budgets
+        guarded by a single lock.
+
+        Returns:
+            Every slot except the lock.
+        """
+        return {
+            name: getattr(self, name)
+            for klass in type(self).__mro__
+            for name in getattr(klass, "__slots__", ())
+            if name not in _UNCOPIED_SLOTS and hasattr(self, name)
+        }
+
+    def __copy__(self) -> RateLimiter:
+        """Return an independent limiter with the same state.
+
+        Each state value is copied one level down, so a limiter holding a
+        mutable container — the sliding log's list of timestamps — does not
+        hand the copy a reference to the original's.
+
+        Returns:
+            A new limiter of the same type, with its own lock and state.
+        """
+        clone = object.__new__(type(self))
+        clone.__setstate__({k: copy.copy(v) for k, v in self.__getstate__().items()})
+        return clone
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state from :meth:`__getstate__`, with a fresh lock.
+
+        Timestamps come from ``time.monotonic()``, which is only
+        meaningful within the process that produced them, so a limiter
+        restored in another process carries meaningless timings. Copy
+        within a process; do not pickle across one.
+
+        Args:
+            state: The mapping returned by :meth:`__getstate__`.
+        """
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+        self._lock = threading.Lock()
 
     @staticmethod
     def _now() -> float:
