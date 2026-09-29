@@ -1,22 +1,66 @@
 name: Publish to PyPI
 
+# Runs after CI passes on a push to main. If limitra.__version__ has not
+# been released yet, it is built, published to PyPI, tagged and given a
+# GitHub release. Otherwise nothing happens. To release, bump __version__
+# (and add a CHANGELOG.md entry) and push.
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# One release at a time, so two quick pushes cannot race for one version.
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  check:
+    name: Check for a new version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+      sha: ${{ steps.sha.outputs.sha }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The commit CI just tested, not whatever main is by now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - id: check
+        run: python .github/release.py check
+
   build:
     name: Build distribution
+    needs: check
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -29,14 +73,11 @@ jobs:
       - name: Check metadata renders on PyPI
         run: twine check --strict dist/*
 
-      - name: Verify the tag matches the package version
+      - name: Check the build carries the version being released
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version=$(python -c "import re,pathlib; print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('src/limitra/__init__.py').read_text()).group(1))")
-          if [ "$tag" != "$version" ]; then
-            echo "release tag '$tag' does not match limitra.__version__ '$version'" >&2
-            exit 1
-          fi
+          ls dist/
+          test -f "dist/abjt_limitter-${{ needs.check.outputs.version }}-py3-none-any.whl"
+          test -f "dist/abjt_limitter-${{ needs.check.outputs.version }}.tar.gz"
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -46,11 +87,11 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/abjt-limitter/
+      url: https://pypi.org/project/abjt-limitter/${{ needs.check.outputs.version }}/
 
     permissions:
       id-token: write  # required for trusted publishing
@@ -64,3 +105,30 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+
+  release:
+    name: Tag and create GitHub release
+    # After the upload, so a failed publish never leaves a tag behind.
+    needs: [check, publish]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          python .github/release.py notes "$VERSION" > notes.md
+          if [ -s notes.md ]; then
+            gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" --notes-file notes.md
+          else
+            gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" --generate-notes
+          fi

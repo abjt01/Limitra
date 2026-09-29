@@ -225,6 +225,21 @@ mypy src/limitra
 Ships with type hints and a `py.typed` marker. Requires Python 3.10+.
 Changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## Releasing
+
+Releases are automatic. Every push to `main` runs CI, and if it passes and
+`__version__` in `src/limitra/__init__.py` is a version that hasn't been
+released yet, it goes to PyPI, gets a `vX.Y.Z` tag and a GitHub release.
+Pushes that don't change the version just run CI.
+
+So to release:
+
+1. Bump `__version__` — patch for fixes, minor for new features, major for
+   breaking changes.
+2. Add a `## [X.Y.Z]` section to `CHANGELOG.md`; it becomes the release
+   notes.
+3. Push.
+
 ## License
 
 MIT
