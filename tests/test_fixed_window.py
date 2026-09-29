@@ -1,7 +1,5 @@
 """Comprehensive tests for the FixedWindow rate limiter."""
 
-import time
-
 import pytest
 
 from limitra import FixedWindow, RateLimitResult
@@ -80,14 +78,18 @@ def test_remaining_decreases():
 # ── Window reset ─────────────────────────────────────────────────────────── #
 
 
-def test_window_reset():
-    """After sleeping past the window duration, the counter resets."""
-    limiter = FixedWindow(limit=5, window=0.1)
+def test_window_reset(clock):
+    """After the window duration passes, the counter resets.
+
+    Runs on the frozen clock: with a 0.1s window and a real sleep, a stall of
+    50ms between the two calls below rolled a second window and failed it.
+    """
+    limiter = FixedWindow(limit=5, window=10.0)
     # Exhaust the limit
     for _ in range(5):
         limiter.allow()
     assert limiter.remaining() == 0, "should be exhausted"
-    time.sleep(0.15)
+    clock.advance(15.0)
     result = limiter.allow()
     assert result.allowed is True, "should be allowed after window reset"
     assert limiter.remaining() == 4, "should have 4 remaining after one use"

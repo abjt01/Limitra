@@ -117,23 +117,23 @@ def test_window_rotation() -> None:
 # ------------------------------------------------------------------ #
 
 
-def test_weighted_count() -> None:
-    """Requests from the previous window carry weight into the current window."""
-    sw = SlidingWindow(limit=5, window=0.1)
+def test_weighted_count(clock) -> None:
+    """Requests from the previous window carry weight into the current window.
+
+    Runs on the frozen clock: with a real sleep, a runner that overslept past
+    two windows would correctly drop the previous count and fail the test.
+    """
+    sw = SlidingWindow(limit=5, window=10.0)
 
     # Use 4 of 5 in the first window
     for _ in range(4):
         sw.allow()
 
-    # Sleep just past the window boundary so counters rotate
-    time.sleep(0.11)
+    # Just past the boundary: prev_counter=4, curr_counter=0, and the overlap
+    # ratio is 0.9, so the weighted count is 3.6 and one slot is free.
+    clock.advance(11.0)
 
-    # Now in a new window: prev_counter=4, curr_counter=0
-    # The overlap ratio is close to 1.0 right at the boundary, so weighted
-    # count ≈ 4 * overlap + 0. We should still have some capacity but not full 5.
-    remaining = sw.remaining()
-    assert remaining < 5  # Previous window's weight reduces capacity
-    assert remaining >= 0
+    assert sw.remaining() == 1
 
 
 # ------------------------------------------------------------------ #

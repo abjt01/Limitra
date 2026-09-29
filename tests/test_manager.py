@@ -160,13 +160,13 @@ def test_cleanup() -> None:
     assert len(mgr) == 0
 
 
-def test_cleanup_keeps_active() -> None:
+def test_cleanup_keeps_active(clock) -> None:
     """cleanup() keeps recently accessed keys."""
     mgr = RateLimitManager(TokenBucket, rate=10.0, capacity=5)
     mgr.allow("active-user")
 
-    # Sleep a short time but less than max_idle
-    time.sleep(0.05)
+    # A short time, but less than max_idle
+    clock.advance(0.05)
 
     # Access the key again to refresh it
     mgr.allow("active-user")
