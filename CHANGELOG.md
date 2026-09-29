@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. This project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-09-29
+
+No changes to the library itself; this release exists to exercise the new
+release pipeline.
+
+- Releases are now automatic: a push to `main` that passes CI and carries
+  a new `__version__` is published to PyPI, tagged, and given a GitHub
+  release built from this file.
+- CI moved to the current major versions of its actions, and now
+  round-trips the build artifact on every push, since that handoff used to
+  run only during a release.
+- Three tests that a slow CI runner could fail by oversleeping now run on
+  a controlled clock.
+
 ## [0.2.0] — 2026-09-18
 
 ### Breaking
